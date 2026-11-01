@@ -1,0 +1,16 @@
+{
+  "Args": [
+    "-integrations", "/daraja/integrations",
+    "-principals", "/daraja/principals.json",
+    "-credentials", "/secrets/credentials.json",
+    "-journal", "/data/journal.jsonl",
+    "-listen", ":8080",
+    "-capabilities", "/daraja/capabilities.json",
+    "-allow-static-tokens",
+    "-unikernel-file-modes"
+  ],
+  "Dirs": ["daraja"],
+  "BaseVolumeSz": "64m",
+  "Env": { "SSL_CERT_FILE": "/daraja/ca.pem" },
+  "RunConfig": { "Ports": ["8080"], "Memory": "256m" }
+}
