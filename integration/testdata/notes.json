@@ -1,0 +1,59 @@
+{
+  "format": "daraja.integration/v1alpha1",
+  "id": "synthetic-notes",
+  "version": "1",
+  "description": "Synthetic notes application used by Daraja tests.",
+  "source": { "kind": "web", "origin": "http://127.0.0.1:1" },
+  "session": {
+    "provider": "http_form",
+    "sign_in": [
+      { "method": "GET", "path": "/login", "extract": { "csrf": { "html_input": "csrf" } } },
+      { "method": "POST", "path": "/login",
+        "form": { "user": "{{credential.username}}", "pass": "{{credential.password}}", "csrf": "{{extracted.csrf}}" },
+        "expect_status": [200] }
+    ],
+    "extract": { "csrf": { "request": { "method": "GET", "path": "/api/me" }, "json_pointer": "/csrf" } },
+    "signed_in": { "request": { "method": "GET", "path": "/api/me" }, "json_pointer": "/user/id", "not_null": true },
+    "request_headers": { "X-CSRF-Token": "{{session.csrf}}" }
+  },
+  "operations": [
+    {
+      "name": "get_note",
+      "description": "Read one note by ID.",
+      "effect": "read",
+      "input_schema": { "type": "object", "required": ["id"], "additionalProperties": false,
+                        "properties": { "id": { "type": "integer", "minimum": 1 } } },
+      "output_schema": { "type": "object", "required": ["id", "title"],
+                         "properties": { "id": { "type": "integer" }, "title": { "type": "string" },
+                                         "body": { "type": "string" } } },
+      "request": { "method": "GET", "path": "/api/notes/{{input.id}}" },
+      "response": { "success_status": [200],
+                    "output": { "id": "/note/id", "title": "/note/title", "body": "/note/body" } }
+    },
+    {
+      "name": "find_note_by_ref",
+      "description": "Find a note by its external reference.",
+      "effect": "read",
+      "input_schema": { "type": "object", "required": ["ref"], "properties": { "ref": { "type": "string" } } },
+      "output_schema": { "type": "object", "properties": { "id": { "type": ["integer", "null"] } } },
+      "request": { "method": "GET", "path": "/api/notes", "query": { "ref": "{{input.ref}}" } },
+      "response": { "success_status": [200], "output": { "id": "/notes/0/id" } }
+    },
+    {
+      "name": "create_note",
+      "description": "Create a note.",
+      "effect": "write",
+      "destructive": false,
+      "input_schema": { "type": "object", "required": ["title"], "additionalProperties": false,
+                        "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+                                        "body": { "type": "string" } } },
+      "output_schema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "integer" } } },
+      "request": { "method": "POST", "path": "/api/notes",
+                   "body": { "note": { "title": "{{input.title}}", "body": "{{input.body}}", "ref": "{{receipt.marker}}" } } },
+      "response": { "success_status": [201], "output": { "id": "/note/id" }, "identifier": "/note/id" },
+      "reconcile": { "strategy": "marker", "operation": "find_note_by_ref",
+                     "input": { "ref": "{{receipt.marker}}" }, "found": "/id" }
+    }
+  ],
+  "provenance": { "built_by": "hand-authored test fixture" }
+}
