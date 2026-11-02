@@ -84,3 +84,43 @@ func TestReadSafeGraphQLGet(t *testing.T) {
 		}
 	}
 }
+
+func TestReadSafeGraphQLPostRefusesURLParams(t *testing.T) {
+	task := &Task{GraphQLReadPaths: []string{"/gql"}}
+	body := []byte(`{"query":"{ __typename }"}`)
+	post := func(u string) *network.Request {
+		return &network.Request{Method: "POST", URL: u, HasPostData: true,
+			PostDataEntries: []*network.PostDataEntry{{Bytes: body}}}
+	}
+	if !readSafe(task, post("https://a.test/gql")) {
+		t.Fatal("plain read-only POST blocked")
+	}
+	for _, u := range []string{
+		"https://a.test/gql?query=mutation%20M%7Bdel%7D",
+		"https://a.test/gql?operationName=Del",
+		"https://a.test/gql?extensions=%7B%7D",
+		"https://a.test/gql?x=1",
+	} {
+		if readSafe(task, post(u)) {
+			t.Errorf("readSafe(POST %s) = true, want false", u)
+		}
+	}
+}
+
+func TestReadSafeRefusesMethodOverride(t *testing.T) {
+	task := &Task{}
+	if !readSafe(task, &network.Request{Method: "GET", URL: "https://a.test/api/tickets/1"}) {
+		t.Fatal("plain GET blocked")
+	}
+	for _, r := range []*network.Request{
+		{Method: "GET", URL: "https://a.test/api/tickets/1", Headers: network.Headers{"X-HTTP-Method-Override": "DELETE"}},
+		{Method: "GET", URL: "https://a.test/api/tickets/1", Headers: network.Headers{"x-http-method": "DELETE"}},
+		{Method: "HEAD", URL: "https://a.test/api/tickets/1", Headers: network.Headers{"X-Method-Override": "PUT"}},
+		{Method: "GET", URL: "https://a.test/api/tickets/1?_method=DELETE"},
+		{Method: "OPTIONS", URL: "https://a.test/api/tickets/1?_METHOD=DELETE"},
+	} {
+		if readSafe(task, r) {
+			t.Errorf("readSafe(%s %s %v) = true, want false", r.Method, r.URL, r.Headers)
+		}
+	}
+}
