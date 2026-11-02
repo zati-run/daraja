@@ -3,6 +3,7 @@ package explore
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"strings"
 )
 
@@ -26,23 +27,67 @@ func parseGraphQL(body []byte) ([]gqlRequest, bool) {
 	}
 	out := make([]gqlRequest, 0, len(raw))
 	for _, r := range raw {
-		var v struct {
-			OperationName *string `json:"operationName"`
-			Query         *string `json:"query"`
-		}
-		if err := json.Unmarshal(r, &v); err != nil {
+		g, ok := parseGraphQLObject(r)
+		if !ok {
 			return nil, false
-		}
-		g := gqlRequest{}
-		if v.OperationName != nil {
-			g.Name = *v.OperationName
-		}
-		if v.Query != nil {
-			g.Query = *v.Query
 		}
 		out = append(out, g)
 	}
 	return out, true
+}
+
+// parseGraphQLObject decodes one request object. It fails closed on any
+// ambiguity a server could resolve differently from Go's decoder: a repeated
+// key, or a key that differs from "query" or "operationName" only in case
+// (encoding/json matches field names case-insensitively, and keeps the last
+// duplicate, so {"query":"mutation…","Query":"{a}"} would otherwise be judged
+// by the wrong document).
+func parseGraphQLObject(r json.RawMessage) (gqlRequest, bool) {
+	var g gqlRequest
+	dec := json.NewDecoder(bytes.NewReader(r))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return g, false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return g, false
+		}
+		key, ok := t.(string)
+		if !ok || seen[key] {
+			return g, false
+		}
+		seen[key] = true
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return g, false
+		}
+		var dst *string
+		switch {
+		case key == "query":
+			dst = &g.Query
+		case key == "operationName":
+			dst = &g.Name
+		case strings.EqualFold(key, "query"), strings.EqualFold(key, "operationName"):
+			return g, false
+		default:
+			continue
+		}
+		if string(bytes.TrimSpace(val)) == "null" {
+			continue
+		}
+		if err := json.Unmarshal(val, dst); err != nil {
+			return g, false
+		}
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return g, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return g, false
+	}
+	return g, true
 }
 
 // graphQLReadOnly reports whether body is a GraphQL request in which every
@@ -174,4 +219,56 @@ func operationKey(reqs []gqlRequest) string {
 		}
 	}
 	return strings.Join(names, "+")
+}
+
+// redactLiterals returns doc with every string, block string and number
+// literal replaced by a placeholder and comments removed, so a recorded query
+// document keeps its shape (operation, fields, arguments, variables) but not
+// values the app inlined, such as a search term or a token.
+func redactLiterals(doc string) string {
+	var b strings.Builder
+	for i := 0; i < len(doc); {
+		c := doc[i]
+		switch {
+		case c == '#':
+			for i < len(doc) && doc[i] != '\n' && doc[i] != '\r' {
+				i++
+			}
+		case strings.HasPrefix(doc[i:], `"""`):
+			j := i + 3
+			for j < len(doc) && !(strings.HasPrefix(doc[j:], `"""`) && doc[j-1] != '\\') {
+				j++
+			}
+			b.WriteString(`""`)
+			i = min(j+3, len(doc))
+		case c == '"':
+			j := i + 1
+			for j < len(doc) && doc[j] != '"' {
+				if doc[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			b.WriteString(`""`)
+			i = min(j+1, len(doc))
+		case isNameStart(c):
+			j := i + 1
+			for j < len(doc) && isNameChar(doc[j]) {
+				j++
+			}
+			b.WriteString(doc[i:j])
+			i = j
+		case c == '-' || (c >= '0' && c <= '9'):
+			j := i + 1
+			for j < len(doc) && (isNameChar(doc[j]) || doc[j] == '.' || doc[j] == '+' || doc[j] == '-') {
+				j++
+			}
+			b.WriteByte('0')
+			i = j
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
 }
