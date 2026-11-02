@@ -128,7 +128,8 @@ When you finish, stop the background processes with `kill %1 %2`.
 | `daraja-runtime` | | Serve MCP, keep the receipt journal, and broker calls. |
 | `daraja-mcpcheck` | | Call a runtime from a small MCP client, for testing. |
 
-Run a command with `-h` to see its flags.
+`validate` takes artifact files and `token` takes no arguments. For the other
+commands, use `-h` to see their flags.
 
 ## Status
 
