@@ -717,6 +717,9 @@ func readSafe(task *Task, r *network.Request) bool {
 	if err != nil {
 		return false
 	}
+	if methodOverridden(r, u) {
+		return false // a server honoring the override would see another method
+	}
 	gql := task.graphQLPath(u.Path)
 	switch m {
 	case "OPTIONS":
@@ -737,7 +740,28 @@ func readSafe(task *Task, r *network.Request) bool {
 		q, _ := json.Marshal(map[string]string{"query": params.Get("query")})
 		return graphQLReadOnly(q)
 	case "POST":
-		return gql && graphQLReadOnly(postBody(r))
+		// A URL query string is refused outright: some servers read query,
+		// operationName, extensions or a persisted-query id from the URL
+		// before the body, so the body alone cannot show what will run.
+		return gql && u.RawQuery == "" && graphQLReadOnly(postBody(r))
+	}
+	return false
+}
+
+// methodOverridden reports whether a request asks the server to treat it as a
+// different method, through a header or a _method parameter that frameworks
+// such as Rails, Laravel and Express method-override honor.
+func methodOverridden(r *network.Request, u *url.URL) bool {
+	for k := range r.Headers {
+		switch strings.ToLower(k) {
+		case "x-http-method-override", "x-http-method", "x-method-override":
+			return true
+		}
+	}
+	for k := range u.Query() {
+		if strings.EqualFold(k, "_method") {
+			return true
+		}
 	}
 	return false
 }
