@@ -108,8 +108,8 @@ type Observation struct {
 	Blocked       bool           `json:"blocked,omitempty"` // a write the explorer refused to send
 	Steps         []int          `json:"steps"`
 	// GraphQLOperation and GraphQLQuery are set for a GraphQL read path:
-	// the operation name and its document text (application code; variable
-	// values are never recorded, only their shape).
+	// the operation name and its document with every inline literal replaced
+	// by a placeholder (variable values are never recorded, only their shape).
 	GraphQLOperation string `json:"graphql_operation,omitempty"`
 	GraphQLQuery     string `json:"graphql_query,omitempty"`
 }
@@ -285,7 +285,7 @@ func (r *recorder) add(method, path string, query url.Values, resType string, st
 	if !ok {
 		o = &Observation{Method: method, PathTemplate: tmpl, PathParams: params, ResourceType: resType, GraphQLOperation: op}
 		if len(gql) == 1 {
-			o.GraphQLQuery = gql[0].Query
+			o.GraphQLQuery = redactLiterals(gql[0].Query)
 		}
 		r.obs[key] = o
 	}
@@ -725,10 +725,16 @@ func readSafe(task *Task, r *network.Request) bool {
 		if !gql {
 			return true
 		}
-		if !u.Query().Has("query") {
-			return false
+		params := u.Query()
+		for k := range params {
+			if k != "query" && strings.EqualFold(k, "query") {
+				return false // a server could read this spelling instead
+			}
 		}
-		q, _ := json.Marshal(map[string]string{"query": u.Query().Get("query")})
+		if len(params["query"]) != 1 {
+			return false // absent, or repeated so a server could pick another copy
+		}
+		q, _ := json.Marshal(map[string]string{"query": params.Get("query")})
 		return graphQLReadOnly(q)
 	case "POST":
 		return gql && graphQLReadOnly(postBody(r))
