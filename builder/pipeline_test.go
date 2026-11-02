@@ -345,7 +345,7 @@ func TestReadOnlyWalkBlocksEveryWriteVector(t *testing.T) {
 		}
 		return app.Creates(), rep
 	}
-	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "ping", "sw"} {
+	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "wsworker", "wsnested", "wsshared", "wsframe", "ping", "sw"} {
 		t.Run(vector, func(t *testing.T) {
 			// Control: with writes allowed, the vector really writes.
 			if n, _ := run(t, vector, []string{"read", "write"}); n == 0 {
@@ -355,7 +355,17 @@ func TestReadOnlyWalkBlocksEveryWriteVector(t *testing.T) {
 			if n != 0 {
 				t.Fatalf("the %s write reached the app in a read-only walk: creates=%d", vector, n)
 			}
-			if vector == "ws" { // not a request the guard intercepts; named as a gap
+			if vector == "wsframe" || vector == "sw" { // held paused, and the report says so
+				held := false
+				for _, g := range rep.Coverage.Gaps {
+					held = held || strings.Contains(g, "held paused")
+				}
+				if !held {
+					t.Errorf("the held frame is not named as a gap: %v", rep.Coverage.Gaps)
+				}
+				return
+			}
+			if strings.HasPrefix(vector, "ws") { // not a request the guard intercepts; named as a gap
 				gap := false
 				for _, g := range rep.Coverage.Gaps {
 					gap = gap || strings.Contains(g, "WebSocket frames are not checked by the write guard")

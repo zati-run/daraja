@@ -338,6 +338,11 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	lctx, cancel := context.WithCancel(b.Ctx)
 	defer cancel()
 	var wg sync.WaitGroup
+	readOnly := !task.allows(integration.EffectWrite)
+	var sg *socketGuard
+	if readOnly {
+		sg = newSocketGuard(b.Ctx, lctx, &wg)
+	}
 	// listen records one tab's traffic. Each tab has its own CDP session,
 	// so request IDs are keyed by tab. Writes are guarded browser-wide
 	// (below), not per tab.
@@ -358,11 +363,18 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 			// Request interception does not see WebSocket frames, and
 			// Network.setBlockedURLs does not stop a WebSocket handshake in
 			// this Chrome (tested). So socket constructors are disabled
-			// before any page script runs in each attached tab. A worker,
-			// or a document that loaded before the tab was attached, keeps
-			// them; the report names sockets as a gap.
+			// before any page script runs in each attached tab, and in each
+			// worker it starts (socketGuard); cross-site frames are held
+			// paused. A document that loaded before its tab was attached
+			// keeps them; the report names sockets as a gap.
 			if _, err := chromedp.Call(tctx, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{Source: noSocketsJS}); err != nil {
 				return fmt.Errorf("disabling WebSockets: %w", err)
+			}
+			if _, err := chromedp.Call(tctx, network.SetBypassServiceWorker, network.SetBypassServiceWorkerParams{Bypass: true}); err != nil {
+				return fmt.Errorf("bypassing service workers: %w", err)
+			}
+			if err := sg.armTab(tctx); err != nil {
+				return fmt.Errorf("disabling WebSockets in workers: %w", err)
 			}
 		}
 		wg.Add(1)
@@ -522,6 +534,12 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	if err := listen(b.Ctx, "main"); err != nil {
 		return nil, err
 	}
+	if readOnly {
+		if err := sg.stopServiceWorkers(b.Ctx); err != nil {
+			return nil, fmt.Errorf("stopping running service workers: %w", err)
+		}
+	}
+	unarmedTabs := 0
 
 	// Follow tabs the page or the person opens (a demonstration often does),
 	// so their traffic is recorded and, in a read-only task, their writes are
@@ -559,7 +577,11 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 			if err := chromedp.Do(tctx); err != nil {
 				continue
 			}
-			_ = listen(tctx, string(id))
+			if err := listen(tctx, string(id)); err != nil {
+				tabsMu.Lock()
+				unarmedTabs++
+				tabsMu.Unlock()
+			}
 		}
 	}()
 
@@ -568,6 +590,9 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	rec.pending.Wait()
 	cancel()
 	wg.Wait()
+	if readOnly {
+		sg.disarm(b.Ctx)
+	}
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -590,7 +615,7 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	if rec.sockets > 0 {
 		gap := fmt.Sprintf("the page opened or tried to open %d WebSocket(s); socket frames are not observed or checked by the write guard", rec.sockets)
 		if !task.allows(integration.EffectWrite) {
-			gap += " (socket constructors were disabled in attached tabs before page scripts ran; a worker, or a document loaded before its tab was attached, keeps them)"
+			gap += " (socket constructors were disabled in attached tabs and their workers before their scripts ran; a document loaded before its tab was attached keeps them)"
 		}
 		rep.Coverage.Gaps = append(rep.Coverage.Gaps, gap)
 	}
@@ -602,6 +627,19 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 		rep.Coverage.Gaps = append(rep.Coverage.Gaps, gap)
 	}
 	tabsMu.Unlock()
+	if readOnly {
+		sg.mu.Lock()
+		if n := len(sg.held); n > 0 {
+			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d cross-site frame(s) or worker(s) were held paused so they could not open sockets; they did not load and their traffic was not recorded", n))
+		}
+		if sg.running > 0 {
+			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d frame(s) or worker(s) were already running when Daraja attached; they keep socket constructors, and socket frames are not checked by the write guard", sg.running))
+		}
+		sg.mu.Unlock()
+		if unarmedTabs > 0 {
+			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d tab(s) could not be fully attached; their sockets and workers were not disabled", unarmedTabs))
+		}
+	}
 	if unsettled {
 		rep.Coverage.Gaps = append(rep.Coverage.Gaps, "the network did not settle before the recording ended; late requests may be missing")
 	}
@@ -695,11 +733,14 @@ func pageFetch(ctx context.Context, b *browser.Browser, task *Task, f *FetchStep
 	return err
 }
 
-// noSocketsJS disables socket constructors in a read-only walk. Socket frames
-// would be a write channel the request guard cannot check.
+// noSocketsJS disables socket constructors (and refuses shared workers) in a
+// read-only walk. Socket frames would be a write channel the request guard
+// cannot check.
 const noSocketsJS = `(() => {
   const refuse = function () { throw new DOMException("sockets are disabled in a read-only Daraja walk", "SecurityError"); };
-  for (const name of ["WebSocket", "WebTransport"]) {
+  // A shared worker is not attached to any one tab, so it cannot be armed
+  // like a dedicated worker; it is refused instead.
+  for (const name of ["WebSocket", "WebTransport", "SharedWorker"]) {
     try { Object.defineProperty(globalThis, name, {value: refuse, writable: false, configurable: false}); } catch (e) {}
   }
 })();`

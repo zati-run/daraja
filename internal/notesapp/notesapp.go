@@ -124,6 +124,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/worker.js":
 		w.Header().Set("Content-Type", "text/javascript")
 		fmt.Fprint(w, `fetch('/api/sink', {method: 'POST', body: 'worker'});`)
+	case r.URL.Path == "/ws-worker.js":
+		w.Header().Set("Content-Type", "text/javascript")
+		fmt.Fprint(w, `new WebSocket('ws://' + location.host + '/ws');`)
+	case r.URL.Path == "/ws-nested.js":
+		w.Header().Set("Content-Type", "text/javascript")
+		fmt.Fprint(w, `new Worker('/ws-worker.js');`)
+	case r.URL.Path == "/ws-frame":
+		fmt.Fprint(w, `<!doctype html><html><body><script>new WebSocket('ws://' + location.host + '/ws');</script></body></html>`)
 	case r.URL.Path == "/popup-now":
 		fmt.Fprint(w, `<!doctype html><html><body><script>fetch('/api/sink', {method: 'POST', body: 'popup'});</script></body></html>`)
 	case r.URL.Path == "/api/sink" && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions:
@@ -290,8 +298,9 @@ func (a *App) graphQL(w http.ResponseWriter, r *http.Request, sid string) {
 
 // writersPage tries every write vector a read-only walk must block: a form
 // posted to a new window, a new window that writes at once, a dedicated
-// worker, a beacon, and a GraphQL mutation over GET. Each lands on a route
-// that counts a create.
+// worker, a beacon, a GraphQL mutation over GET, and WebSockets opened from a
+// page, a worker, a nested worker, a shared worker and a cross-site frame.
+// Each lands on a route that counts a create.
 const writersPage = `<!doctype html><html><body>
 <form id=f method=post action="/api/sink" target="_blank"><input name=x value=1></form>
 <button id=form onclick="document.getElementById('f').submit()">form</button>
@@ -302,6 +311,10 @@ const writersPage = `<!doctype html><html><body>
 <button id=ws onclick="try { new WebSocket('ws://' + location.host + '/ws') } catch (e) {}">ws</button>
 <a id=ping href="/writers#pinged" ping="/api/sink">ping</a>
 <button id=sw onclick="navigator.serviceWorker.register('/sw.js')">sw</button>
+<button id=wsworker onclick="new Worker('/ws-worker.js')">wsworker</button>
+<button id=wsnested onclick="new Worker('/ws-nested.js')">wsnested</button>
+<button id=wsshared onclick="new SharedWorker('/ws-worker.js')">wsshared</button>
+<button id=wsframe onclick="const f = document.createElement('iframe'); f.src = 'http://' + (location.hostname === 'localhost' ? '127.0.0.1' : 'localhost') + ':' + location.port + '/ws-frame'; document.body.appendChild(f)">wsframe</button>
 <button id=gqlget onclick="fetch('/api/graphql?query=' + encodeURIComponent('mutation M { createNote(title: &quot;x&quot;) { id } }'))">gqlget</button>
 </body></html>`
 
