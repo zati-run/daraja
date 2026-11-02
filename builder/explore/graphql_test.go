@@ -54,6 +54,8 @@ func TestRedactLiterals(t *testing.T) {
 		{`query Q { customer(token: "SECRET", n: 42, f: -1.5e3) { id } }`, `query Q { customer(token: "", n: 0, f: 0) { id } }`},
 		{`query Q { a(d: """multi\nline SECRET""") }`, `query Q { a(d: "") }`},
 		{`query Q { a(s: "esc \" SECRET") }`, `query Q { a(s: "") }`},
+		{`query Q { a(s: """prefix \"""" SECRET suffix""") }`, `query Q { a(s: "") }`},
+		{`query Q { a(s: """x \""" y \""" SECRET""") b }`, `query Q { a(s: "") b }`},
 		{"# SECRET comment\nquery Q { field2 }", "\nquery Q { field2 }"},
 	}
 	for _, tc := range cases {
