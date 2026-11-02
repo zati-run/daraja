@@ -236,7 +236,11 @@ func redactLiterals(doc string) string {
 			}
 		case strings.HasPrefix(doc[i:], `"""`):
 			j := i + 3
-			for j < len(doc) && !(strings.HasPrefix(doc[j:], `"""`) && doc[j-1] != '\\') {
+			for j < len(doc) && !strings.HasPrefix(doc[j:], `"""`) {
+				if strings.HasPrefix(doc[j:], `\"""`) { // escaped quote run: skip all of it
+					j += 4
+					continue
+				}
 				j++
 			}
 			b.WriteString(`""`)
