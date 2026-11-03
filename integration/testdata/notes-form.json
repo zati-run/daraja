@@ -130,7 +130,7 @@
         ],
         "extract": {
           "id": {
-            "css": "li.note",
+            "css": "small.ref",
             "attr": "data-id",
             "text": "{{input.ref}}"
           }

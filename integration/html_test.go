@@ -153,6 +153,7 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"list box with nothing selected sends nothing", wrap(`<select name="s" size="3"><option value="a">A</option></select>`, ""), "title=new"},
 		{"last checked radio wins", wrap(`<input type="radio" name="mode" value="delete" checked><input type="radio" name="mode" value="save" checked>`, ""), "mode=save&title=new"},
 		{"last checked radio disabled sends nothing", wrap(`<input type="radio" name="mode" value="a" checked><input type="radio" name="mode" value="b" checked disabled>`, ""), "title=new"},
+		{"checked radio keeps its place before a later control", wrap(`<input type="radio" name="mode" value="save" checked><input type="hidden" name="mode" value="delete">`, ""), "mode=save&mode=delete&title=new"},
 		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
 	}
 	for _, tc := range cases {
@@ -170,6 +171,61 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 	disabled := []byte(`<form id="f" method="post" action="/notes"><fieldset disabled><input name="title"></fieldset></form>`)
 	if _, err := formOp(nil).FormFields("http://a.test", disabled, v); !errors.Is(err, ErrSourceChanged) {
 		t.Errorf("declared disabled field: err = %v, want ErrSourceChanged", err)
+	}
+}
+
+func TestFormFixtureMarkerInATitleIsNotFound(t *testing.T) {
+	raw, err := os.ReadFile("testdata/notes-form.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list *CompiledOp
+	for name := range in.ops {
+		if op := in.ops[name]; op.Effect == EffectRead && len(op.Response.Extract["id"].Text) > 0 {
+			list = op
+		}
+	}
+	if list == nil {
+		t.Fatal("no anchored read in the fixture")
+	}
+	page := []byte(`<ul><li class="note"><a href="/notes/1">about m-1</a> <small class="ref" data-id="1">m-other</small></li></ul>`)
+	v := Vars{Input: map[string]any{"ref": "m-1"}}
+	if got, ok := list.ExtractValues("http://a.test", Answer{Status: 200, Body: page}, v)["id"]; ok {
+		t.Errorf("found %q from a marker in a title", got)
+	}
+}
+
+func TestDeclaredTextareaValueBecomesCRLF(t *testing.T) {
+	o := formOp(func(o *Operation) { o.Request.Form["body"] = "{{input.body}}" })
+	page := []byte(`<form id="f" method="post" action="/notes"><input name="title"><textarea name="body"></textarea></form>`)
+	got, err := o.FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "a\nb", "body": "a\nb"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("body") != "a\r\nb" {
+		t.Errorf("body = %q", got.Get("body"))
+	}
+	if got.Get("title") != "a\nb" {
+		t.Errorf("title = %q", got.Get("title"))
+	}
+}
+
+func TestDeclaredButtonWithItsOwnTargetIsDrift(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "new"}}
+	for _, b := range []string{
+		`<button name="save" value="1" formaction="/other">`,
+		`<button name="save" value="1" formmethod="get">`,
+		`<input type="submit" name="save" value="1" formaction="/other">`,
+	} {
+		page := []byte(`<form id="f" method="post" action="/notes"><input name="title">` + b + `</form>`)
+		o := formOp(func(o *Operation) { o.Request.Form["save"] = "1" })
+		if _, err := o.FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
+			t.Errorf("%s: err = %v, want ErrSourceChanged", b, err)
+		}
 	}
 }
 

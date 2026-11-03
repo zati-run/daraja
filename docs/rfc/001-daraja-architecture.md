@@ -55,11 +55,14 @@ hasn't separately decided, and the details below replace the sketch in
   whole pattern), or a JSON Pointer. A text anchor can use `{{input.x}}`, so
   a reconcile read can find a marker in an HTML list.
 - **Writes** must declare `request.form_page` and fetch it first. The submitted
-  values are what a browser would send for that form, including its CSRF token,
-  with `request.form` set over them. That follows form ownership, disabled
-  fieldsets and options, and `<base href>`. The action must match the path and
-  query that will be sent. A page over 8 MiB is drift, because a cut-off page
-  could lose a field.
+  values are the form's own, including its CSRF token, with `request.form` set
+  over them. They follow the common rules a browser applies: form ownership,
+  disabled fieldsets and options, select defaults, radio groups and textarea
+  newlines. This isn't a full implementation of HTML form submission, and a page
+  that relies on script to change values at submit isn't covered. A declared
+  button with its own `formaction` or similar is drift. The action must match the
+  path and query that will be sent. A page over 8 MiB is drift, because a cut-off
+  page could lose a field.
 - **Drift is checked before sending.** The selector must match exactly one
   form, and its method, action and encoding must match the artifact, and every
   declared field must exist. Otherwise the write is `failed/not_sent` with
