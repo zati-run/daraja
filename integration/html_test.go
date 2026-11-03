@@ -229,6 +229,27 @@ func TestDeclaredButtonWithItsOwnTargetIsDrift(t *testing.T) {
 	}
 }
 
+func TestDeclaredNameSharedWithAnOverridingButtonIsDrift(t *testing.T) {
+	page := []byte(`<form id="f" method="post" action="/notes"><input name="title"><input type="hidden" name="action" value="save"><button name="action" value="delete" formaction="/delete">x</button></form>`)
+	o := formOp(func(o *Operation) { o.Request.Form["action"] = "delete" })
+	if _, err := o.FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "t"}}); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("err = %v, want ErrSourceChanged", err)
+	}
+}
+
+func TestUndeclaredControlABrowserRewritesIsDrift(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "t", "q": "5"}}
+	page := []byte(`<form id="f" method="post" action="/notes"><input name="title"><input type="range" name="quantity" min="1" max="10" value="100"></form>`)
+	if _, err := formOp(nil).FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) || strings.Contains(err.Error(), "quantity") {
+		t.Errorf("undeclared: err = %v, want ErrSourceChanged without the field's name", err)
+	}
+	o := formOp(func(o *Operation) { o.Request.Form["quantity"] = "{{input.q}}" })
+	got, err := o.FormFields("http://a.test", page, v)
+	if err != nil || got.Get("quantity") != "5" {
+		t.Errorf("declared: %v, %v", got, err)
+	}
+}
+
 func TestParseRefusesFormOperationsThatCantWork(t *testing.T) {
 	read := func(m map[string]any, f func(op, resp map[string]any)) {
 		for _, o := range m["operations"].([]any) {
