@@ -70,6 +70,8 @@ func TestWriteClassifiesDeclaredFailures(t *testing.T) {
 		{"number that would round into the declared one stays uncertain", `{"data":{"code":9007199254740993}}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"contains ignores a non-string", `{"data":{"flag":false}}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"trailing text stays uncertain", `{"data":{"ok":false}} trailing`, journal.Uncertain, CodeOutcomeUncertain},
+		{"closing bracket after the JSON stays uncertain", `{"data":{"ok":false}}]`, journal.Uncertain, CodeOutcomeUncertain},
+		{"number out of float range stays uncertain", `{"data":{"ok":false,"a":{"id":7}},"extra":1e400}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"not JSON stays uncertain", `<html>sign in</html>`, journal.Uncertain, CodeOutcomeUncertain},
 		{"success", `{"data":{"a":{"__typename":"Ok","id":7}}}`, journal.Succeeded, ""},
 	}
