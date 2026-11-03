@@ -510,7 +510,7 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 		if _, err := cdp.Call(b.Ctx, bs, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: "*"}}}); err != nil {
 			return nil, fmt.Errorf("browser-wide write guard: %w", err)
 		}
-		defer cdp.Call(b.Ctx, bs, fetch.Disable, cdp.Empty{}) //nolint:errcheck
+		// Never disabled: this guard ends only when Chrome does, on every return.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
