@@ -151,6 +151,8 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"first enabled option is the default", wrap(`<select name="s"><optgroup disabled><option value="a">A</option></optgroup><option value="b">B</option></select>`, ""), "s=b&title=new"},
 		{"single select keeps the last selected", wrap(`<select name="s"><option value="a" selected>A</option><option value="b" selected>B</option></select>`, ""), "s=b&title=new"},
 		{"list box with nothing selected sends nothing", wrap(`<select name="s" size="3"><option value="a">A</option></select>`, ""), "title=new"},
+		{"last checked radio wins", wrap(`<input type="radio" name="mode" value="delete" checked><input type="radio" name="mode" value="save" checked>`, ""), "mode=save&title=new"},
+		{"last checked radio disabled sends nothing", wrap(`<input type="radio" name="mode" value="a" checked><input type="radio" name="mode" value="b" checked disabled>`, ""), "title=new"},
 		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
 	}
 	for _, tc := range cases {
@@ -228,18 +230,32 @@ func TestFormActionComparesTheQuerySent(t *testing.T) {
 	if _, err := formOp(withQuery).FormFields("http://a.test", page("/notes?mode=delete"), v); err != nil {
 		t.Errorf("the query the form posts to: err = %v", err)
 	}
+	if _, err := formOp(nil).FormFields("http://a.test", page("/notes?mode=%ZZ"), v); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("a malformed query: err = %v", err)
+	}
 	if _, err := formOp(nil).FormFields("http://a.test", page("/notes?mode=delete"), v); !errors.Is(err, ErrSourceChanged) {
 		t.Errorf("a form action with a query the artifact doesn't send: err = %v", err)
+	}
+}
+
+func TestLocationOnAnOrdinaryAnswerIsNotRead(t *testing.T) {
+	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/[0-9]+$", Extract: map[string]Extract{"id": {LocationRegex: "^/notes/([0-9]+)$"}}}}
+	a := Answer{Status: 200, Location: "/notes/7"}
+	if o.RedirectSucceeded("http://a.test", a) {
+		t.Error("a 200 with a Location counted as a redirect")
+	}
+	if v, ok := o.ExtractValues("http://a.test", a, Vars{})["id"]; ok {
+		t.Errorf("extracted %q from a 200", v)
 	}
 }
 
 func TestRelativeRedirectIsNotRead(t *testing.T) {
 	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/[0-9]+$", Extract: map[string]Extract{"id": {LocationRegex: "^/notes/([0-9]+)$"}}}}
 	for loc, want := range map[string]bool{"notes/7": false, "./notes/7": false, "/notes/7": true, "http://a.test/notes/7": true, "//evil.test/notes/7": false} {
-		if got := o.RedirectSucceeded("http://a.test", Answer{Location: loc}); got != want {
+		if got := o.RedirectSucceeded("http://a.test", Answer{Status: 303, Location: loc}); got != want {
 			t.Errorf("RedirectSucceeded(%s) = %v, want %v", loc, got, want)
 		}
-		if _, got := o.ExtractValues("http://a.test", Answer{Location: loc}, Vars{})["id"]; got != want {
+		if _, got := o.ExtractValues("http://a.test", Answer{Status: 303, Location: loc}, Vars{})["id"]; got != want {
 			t.Errorf("ExtractValues(%s) found = %v, want %v", loc, got, want)
 		}
 	}
@@ -248,7 +264,7 @@ func TestRelativeRedirectIsNotRead(t *testing.T) {
 func TestLocationRegexAnchorsTheWholePattern(t *testing.T) {
 	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/([0-9]+)|/done$"}}
 	for loc, want := range map[string]bool{"/notes/123": true, "/done": true, "/notes/123/login": false, "/x/done": false} {
-		if got := o.RedirectSucceeded("http://a.test", Answer{Location: loc}); got != want {
+		if got := o.RedirectSucceeded("http://a.test", Answer{Status: 303, Location: loc}); got != want {
 			t.Errorf("RedirectSucceeded(%s) = %v, want %v", loc, got, want)
 		}
 	}
@@ -263,7 +279,7 @@ func TestExtractValues(t *testing.T) {
 		"noattr":  {CSS: "li.n", Attr: "href"},
 		"loc":     {LocationRegex: "^/notes/([0-9]+)$"},
 	}}}
-	got := o.ExtractValues("http://a.test", Answer{Body: page, Location: "/notes/42"}, Vars{Input: map[string]any{"ref": "m-2"}})
+	got := o.ExtractValues("http://a.test", Answer{Body: page, Status: 303, Location: "/notes/42"}, Vars{Input: map[string]any{"ref": "m-2"}})
 	for k, want := range map[string]string{"first": "First", "by_ref": "2", "loc": "42"} {
 		if got[k] != want {
 			t.Errorf("%s = %q, want %q", k, got[k], want)
@@ -274,7 +290,7 @@ func TestExtractValues(t *testing.T) {
 			t.Errorf("%s = %q, want absent", k, got[k])
 		}
 	}
-	off := o.ExtractValues("http://a.test", Answer{Location: "https://evil.test/notes/42"}, Vars{})
+	off := o.ExtractValues("http://a.test", Answer{Status: 303, Location: "https://evil.test/notes/42"}, Vars{})
 	if _, ok := off["loc"]; ok {
 		t.Error("a location on another origin was read")
 	}
@@ -299,7 +315,7 @@ func TestRedirectSucceeded(t *testing.T) {
 		"//evil.test/notes/7":       false,
 		"":                          false,
 	} {
-		if got := o.RedirectSucceeded("http://a.test", Answer{Location: loc}); got != want {
+		if got := o.RedirectSucceeded("http://a.test", Answer{Status: 303, Location: loc}); got != want {
 			t.Errorf("%q = %v, want %v", loc, got, want)
 		}
 	}
