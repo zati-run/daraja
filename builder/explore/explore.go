@@ -760,7 +760,8 @@ const noSocketsJS = `(() => {
 
 // stopPages ends everything a read-only walk started. The main tab goes first,
 // so it can't open more tabs; then every other tab is closed until none is left,
-// including any opened while this runs. It reports whether all of it stopped.
+// including any opened while this runs, and the main tab is sent back if one of
+// them navigated it. It reports whether all of it stopped.
 func stopPages(ctx context.Context, b *browser.Browser, sg *socketGuard) bool {
 	ok := true
 	nctx, ncancel := context.WithTimeout(b.Ctx, 10*time.Second)
@@ -776,6 +777,13 @@ func stopPages(ctx context.Context, b *browser.Browser, sg *socketGuard) bool {
 		}
 		others := 0
 		for _, t := range res.TargetInfos {
+			if t.TargetID == main && t.URL != "about:blank" {
+				// A tab closed only just now may have navigated its opener.
+				others++
+				if err := chromedp.Do(nctx, chromedp.Navigate("about:blank")); err != nil {
+					ok = false
+				}
+			}
 			if t.Type == "page" && t.TargetID != main {
 				others++
 				if _, err := chromedp.Call(nctx, target.CloseTarget, target.CloseTargetParams{TargetID: t.TargetID}); err != nil && nctx.Err() != nil {
