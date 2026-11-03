@@ -57,7 +57,11 @@ These are **[Proposal]** changes the owner hasn't separately decided:
   its declared identifier the write stays `uncertain`, and if the operation
   declares no identifier, a success status records `succeeded`, so such a write
   can't detect a failure nobody declared. If it declares an output or
-  `refused_when`, a body that doesn't decode stays `uncertain`.
+  `refused_when`, a body that doesn't decode stays `uncertain`. A reconcile read
+  must map an output, and a read's body must be one JSON value.
+- **Known gaps, not addressed here.** A reconcile read can take an undeclared
+  error sent with a success status for absence (issue #5). Go's transport can
+  resend a GET write on a reused connection (issue #6).
 - **Revision 6's example was wrong for this case.** A note to a missing ticket
   doesn't answer `CreateOrUpdateTicketFailure`. It answers HTTP 200 with `data`
   null and a generic `INTERNAL_SERVER_ERROR`, and the `RESOURCE_NOT_FOUND` code
@@ -704,7 +708,9 @@ Other rules:
 - `daraja__reconcile` runs the declared reconcile read, which may be HTTP or
   `browser.steps`. It finds the effect (`succeeded`) or confirms it's absent
   after the settle window (`not_applied`). If the read fails, the receipt
-  stays `uncertain`.
+  stays `uncertain`. **Known gap (issue #5):** "absent" means the read answered
+  with a success status and without the `found` value, so an error sent with a
+  success status that no `refused_when` entry declares reads as absent.
 - On restart, `dispatching` receipts become `uncertain`.
 - A lost capability answer is `uncertain`.
 - A redirected write, or a success status without the declared response
