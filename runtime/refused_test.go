@@ -23,6 +23,11 @@ const refusedArtifact = `{
      "request": {"method": "POST", "path": "/gql", "body": {"query": "{ a }"}},
      "response": {"success_status": [200], "output": {"id": "/data/a/id"},
        "refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}]}},
+    {"name": "check", "description": "Read with no output.", "effect": "read", "reviewed_safe_method": true,
+     "input_schema": {"type": "object"}, "output_schema": {"type": "object"},
+     "request": {"method": "POST", "path": "/gql", "body": {"query": "{ b }"}},
+     "response": {"success_status": [200],
+       "refused_when": [{"json_pointer": "/data/ok", "equals": "false"}]}},
     {"name": "update", "description": "Write.", "effect": "write", "destructive": false,
      "input_schema": {"type": "object"}, "output_schema": {"type": "object"},
      "request": {"method": "POST", "path": "/gql", "body": {"query": "mutation { a }", "ref": "{{receipt.marker}}"}},
@@ -53,7 +58,7 @@ func refusalRuntime(t *testing.T, answer string) (*Runtime, *Principal) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { j.Close() })
-	p := Principal{ID: "p", TokenSHA256: HashToken("t"), Grants: []Grant{{Integration: "refusals", Operations: []string{"lookup", "update", "plain"}}}}
+	p := Principal{ID: "p", TokenSHA256: HashToken("t"), Grants: []Grant{{Integration: "refusals", Operations: []string{"lookup", "check", "update", "plain"}}}}
 	r, err := New(Config{Integrations: []*integration.Compiled{in}, Principals: []Principal{p}, Journal: j})
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +158,25 @@ func TestReadRefusesUnreadableAnswer(t *testing.T) {
 			b, _ := json.Marshal(e)
 			t.Errorf("answer %s: error = %s, want %s", answer, b, CodeInvalidOutput)
 		}
+	}
+}
+
+func TestReadWithRefusalsAndNoOutputRefusesUnreadableAnswer(t *testing.T) {
+	t.Parallel()
+	r, p := refusalRuntime(t, `<html>sign in</html>`)
+	_, e := r.Invoke(context.Background(), p, "refusals", "check", nil, "")
+	if e == nil || e.Code != CodeInvalidOutput {
+		b, _ := json.Marshal(e)
+		t.Fatalf("error = %s, want %s", b, CodeInvalidOutput)
+	}
+}
+
+func TestParseRefusesReconcileReadWithoutOutput(t *testing.T) {
+	t.Parallel()
+	bad := strings.Replace(strings.Replace(refusedArtifact, `"output": {"id": "/data/a/id"},
+       "refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}]}}`, `"refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}]}}`, 1), "ORIGIN", "http://127.0.0.1:1", 1)
+	if _, err := integration.Parse([]byte(bad)); err == nil || !strings.Contains(err.Error(), "must map an output") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
