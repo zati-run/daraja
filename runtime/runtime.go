@@ -431,6 +431,10 @@ func (r *Runtime) write(ctx context.Context, p *Principal, in *integration.Compi
 	default:
 		rec.HTTPStatus = x.status
 		switch {
+		case slices.Contains(op.Response.SuccessStatus, x.status) && op.Refused(x.body) && identifier(op, x.body) == "":
+			rec.State, rec.Code, rec.Detail = journal.Failed, CodeSourceRefused, "the source answered with a declared failure"
+		case slices.Contains(op.Response.SuccessStatus, x.status) && op.Refused(x.body):
+			rec.State, rec.Code, rec.Detail = journal.Uncertain, CodeOutcomeUncertain, "the source answered with both a declared failure and an identifier; the effect may have been applied"
 		case slices.Contains(op.Response.SuccessStatus, x.status) && !wellFormed(op, x.body):
 			// A success status without the declared shape is most often a
 			// sign-in or error page. The effect is unknown; reconcile it.
@@ -777,6 +781,9 @@ func errClass(err error) string {
 func (r *Runtime) mapResponse(op *integration.CompiledOp, status int, body []byte) (map[string]any, *Error) {
 	if !slices.Contains(op.Response.SuccessStatus, status) {
 		return nil, errf(CodeSourceRefused, "the source answered with status %d", status)
+	}
+	if op.Refused(body) {
+		return nil, errf(CodeSourceRefused, "the source answered with a declared failure")
 	}
 	var doc any
 	if len(op.Response.Output) > 0 {
