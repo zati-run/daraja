@@ -165,7 +165,7 @@ func (o *Operation) ExtractValues(origin string, a Answer, v Vars) map[string]st
 		switch {
 		case e.CSS != "":
 			if doc == nil {
-				parsed, err := html.Parse(bytes.NewReader(a.Body))
+				parsed, err := parsePage(a.Body)
 				if err != nil {
 					continue
 				}
@@ -316,7 +316,7 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 	if err != nil {
 		return nil, fmt.Errorf("form selector: %w", err)
 	}
-	doc, err := html.Parse(bytes.NewReader(page))
+	doc, err := parsePage(page)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the form page does not parse", ErrSourceChanged)
 	}
@@ -383,6 +383,30 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 		}
 	}
 	return values, nil
+}
+
+// parsePage parses an HTML answer as a browser's document: a template's contents
+// are inert and aren't part of it, but Go's parser makes them ordinary children.
+// So nothing in one can match a selector, or count as a control or an option.
+func parsePage(body []byte) (*html.Node, error) {
+	doc, err := html.Parse(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	var strip func(*html.Node)
+	strip = func(n *html.Node) {
+		for c := n.FirstChild; c != nil; {
+			next := c.NextSibling
+			if c.Type == html.ElementNode && c.DataAtom == atom.Template && c.Namespace == "" {
+				n.RemoveChild(c)
+			} else {
+				strip(c)
+			}
+			c = next
+		}
+	}
+	strip(doc)
+	return doc, nil
 }
 
 // countID counts the elements with an ID.
@@ -490,9 +514,6 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 	var find func(*html.Node)
 	find = func(n *html.Node) {
 		if n.Type == html.ElementNode {
-			if n.DataAtom == atom.Template {
-				return
-			}
 			// A radio in a datalist still unchecks its group, though it's never sent.
 			if group, ok := checkedRadio(n); ok && ownedBy(n, form) {
 				radios[group] = n
@@ -506,7 +527,7 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
-			if n.DataAtom == atom.Datalist || n.DataAtom == atom.Template {
+			if n.DataAtom == atom.Datalist {
 				return // never submitted
 			}
 			name, named := attr(n, "name")

@@ -243,7 +243,7 @@ func (o *Operation) Refused(body []byte) bool {
 	for _, r := range o.Response.RefusedWhen {
 		if r.CSS != "" {
 			if page == nil {
-				p, err := html.Parse(bytes.NewReader(body))
+				p, err := parsePage(body)
 				if err != nil {
 					continue
 				}
