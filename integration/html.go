@@ -128,7 +128,13 @@ func LocalLocation(origin, loc string) (string, bool) {
 	return u.RequestURI(), true
 }
 
-func (a Answer) isRedirect() bool { return a.Status >= 300 && a.Status < 400 }
+func (a Answer) isRedirect() bool {
+	switch a.Status {
+	case 301, 302, 303, 307, 308:
+		return true
+	}
+	return false // 304 and the rest of 3xx don't redirect
+}
 
 // redirectPath is the local path and query of a Location header. A location
 // relative to the request's own path can't be resolved from the origin alone, so
