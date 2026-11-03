@@ -427,8 +427,11 @@ func (b *Browser) Fetch(ctx context.Context, in *integration.Compiled, req capab
 		}
 		return res, nil
 	}
+	if a.Err == capability.ErrBodyTooLarge.Error() {
+		return capability.FetchResult{}, capability.ErrBodyTooLarge
+	}
 	if a.Err != "" {
-		// Sent, but the answer could not be read (for example, too large).
+		// Sent, but the answer could not be read.
 		return capability.FetchResult{}, errors.New(a.Err)
 	}
 	body, err := base64.StdEncoding.DecodeString(a.Body)

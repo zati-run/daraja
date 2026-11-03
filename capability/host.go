@@ -21,6 +21,9 @@ import (
 // could leave the page.
 var ErrNotSent = errors.New("request not sent")
 
+// ErrBodyTooLarge reports an answer over MaxBody. The request was sent.
+var ErrBodyTooLarge = errors.New("response exceeds 8 MiB")
+
 // ErrNeedsHuman reports that restoring a session needs a person.
 var ErrNeedsHuman = errors.New("signing in again needs a person")
 
@@ -213,7 +216,7 @@ func (h *Host) Execute(ctx context.Context, job Job) Outcome {
 	if op.Effect == integration.EffectWrite {
 		vars.Receipt = map[string]string{"marker": job.Marker}
 	}
-	fields, out, ok := h.formFields(ctx, b, in, op, vars)
+	fields, out, ok := h.formFields(ctx, b, in, op, vars, values)
 	if !ok {
 		return out
 	}
@@ -225,12 +228,8 @@ func (h *Host) Execute(ctx context.Context, job Job) Outcome {
 	for k := range req.Header {
 		fr.Headers[k] = req.Header.Get(k)
 	}
-	for k, t := range in.Session.RequestHeaders {
-		v, err := (integration.Vars{Session: values}).RenderString(t, nil)
-		if err != nil {
-			return notSent(CodeSession, "session header %s: %v", k, err)
-		}
-		fr.Headers[k] = v
+	if out, ok := sessionHeaders(in, values, fr.Headers); !ok {
+		return out
 	}
 	if req.Body != nil {
 		fr.Body, err = io.ReadAll(req.Body)
@@ -259,10 +258,22 @@ func (h *Host) Execute(ctx context.Context, job Job) Outcome {
 	return Outcome{Dispatch: Sent, Status: res.Status, Body: res.Body, Redirected: res.Redirected, Location: res.Location}
 }
 
+// sessionHeaders adds the session's declared request headers.
+func sessionHeaders(in *integration.Compiled, values, headers map[string]string) (Outcome, bool) {
+	for k, t := range in.Session.RequestHeaders {
+		v, err := (integration.Vars{Session: values}).RenderString(t, nil)
+		if err != nil {
+			return notSent(CodeSession, "session header %s: %v", k, err), false
+		}
+		headers[k] = v
+	}
+	return Outcome{}, true
+}
+
 // formFields fetches the operation's form page, if it has one, and reads the
 // values to submit. Every failure here is before the submission, so nothing
 // with an effect was sent.
-func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.Compiled, op *integration.CompiledOp, vars integration.Vars) (url.Values, Outcome, bool) {
+func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.Compiled, op *integration.CompiledOp, vars integration.Vars, session map[string]string) (url.Values, Outcome, bool) {
 	if op.Request.FormPage == nil {
 		return nil, Outcome{}, true
 	}
@@ -270,9 +281,18 @@ func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.C
 	if err != nil {
 		return nil, notSent(CodeInvalidInput, "form page: %v", err), false
 	}
-	res, err := b.Page.Fetch(ctx, in, FetchRequest{Method: http.MethodGet, URL: in.Source.Origin + path, Headers: map[string]string{"Accept": integration.AcceptHTML}})
+	headers := map[string]string{"Accept": integration.AcceptHTML}
+	if out, ok := sessionHeaders(in, session, headers); !ok {
+		return nil, out, false
+	}
+	res, err := b.Page.Fetch(ctx, in, FetchRequest{Method: http.MethodGet, URL: in.Source.Origin + path, Headers: headers})
 	if errors.Is(err, ErrHumanActive) {
 		return nil, notSent(CodeNeedsHuman, "%v", err), false
+	}
+	if errors.Is(err, ErrBodyTooLarge) {
+		// Nothing with an effect was sent, and parsing part of a page could
+		// lose a field.
+		return nil, notSent(CodeSourceChanged, "the form page exceeds 8 MiB"), false
 	}
 	if err != nil {
 		return nil, notSent(CodeSession, "form page: %v", err), false
@@ -284,11 +304,7 @@ func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.C
 	if res.Status != http.StatusOK {
 		return nil, notSent(CodeSourceChanged, "the form page answered %d", res.Status), false
 	}
-	target, err := vars.RenderString(op.Request.Path, url.PathEscape)
-	if err != nil {
-		return nil, notSent(CodeInvalidInput, "form action: %v", err), false
-	}
-	fields, err := op.FormFields(in.Source.Origin, res.Body, target, vars)
+	fields, err := op.FormFields(in.Source.Origin, res.Body, vars)
 	if errors.Is(err, integration.ErrSourceChanged) {
 		return nil, notSent(CodeSourceChanged, "%v", err), false
 	}

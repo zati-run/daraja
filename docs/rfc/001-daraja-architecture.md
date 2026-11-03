@@ -51,13 +51,15 @@ hasn't separately decided, and the details below replace the sketch in
 
 - **Reads** fetch a page and take outputs from `response.extract`: a CSS
   selector with an optional attribute and text anchor, an anchored
-  `location_regex` (its anchors apply to the whole pattern), or a JSON Pointer. A text anchor can use `{{input.x}}`, so
+  `location_regex` (a write's redirect only, with its anchors applying to the
+  whole pattern), or a JSON Pointer. A text anchor can use `{{input.x}}`, so
   a reconcile read can find a marker in an HTML list.
 - **Writes** must declare `request.form_page` and fetch it first. The submitted
   values are what a browser would send for that form, including its CSRF token,
   with `request.form` set over them. That follows form ownership, disabled
-  fieldsets and options, and `<base href>`. A page over 8 MiB is drift, because a
-  cut-off page could lose a field.
+  fieldsets and options, and `<base href>`. The action must match the path and
+  query that will be sent. A page over 8 MiB is drift, because a cut-off page
+  could lose a field.
 - **Drift is checked before sending.** The selector must match exactly one
   form, and its method, action and encoding must match the artifact, and every
   declared field must exist. Otherwise the write is `failed/not_sent` with
@@ -66,14 +68,17 @@ hasn't separately decided, and the details below replace the sketch in
   status alone can't show that a form write worked, because most sign-in and
   validation pages answer 200.
 - **Post-redirect-get.** `response.redirect_success` is an anchored pattern for
-  a local path and query. A redirect matching it is success. Any other redirect
-  stays `uncertain`, so a redirect to sign in is never success. In the page,
+  a local path and query. A redirect matching it is success, unless its body
+  also matches `refused_when`. Any other redirect stays `uncertain`, so a redirect
+  to sign in is never success. A form operation can't list a 3xx in
+  `success_status`. A relative `Location` such as `notes/7` isn't read, because it
+  depends on the request's path, so that write stays `uncertain`. In the page,
   `fetch` can't read a redirect's target, so the capability reads it from the
   browser's network events. If it can't tell the answer apart, the write stays
   `uncertain`.
 - `response.refused_when` also takes `css`, for a validation error on a page.
-  It applies only to a status in `success_status`, so a form that answers 200
-  with its errors must list 200.
+  It applies to a status in `success_status`, or a redirect matching
+  `redirect_success`, so a form that answers 200 with its errors must list 200.
 - **`placement` isn't a field.** The session provider decides where an
   operation runs.
 

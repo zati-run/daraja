@@ -690,6 +690,18 @@ func (c *Compiled) validateExecution(op *Operation, where string, add func(strin
 		if len(resp.Extract) == 0 && op.Effect == EffectRead {
 			add("%s: a read needs response.extract", where)
 		}
+		for _, st := range resp.SuccessStatus {
+			if st >= 300 && st < 400 {
+				add("%s: an http.form_html operation declares a redirect with response.redirect_success, not success_status", where)
+			}
+		}
+		if op.Effect != EffectWrite {
+			for name, e := range resp.Extract {
+				if e.LocationRegex != "" {
+					add("%s: response.extract.%s: location_regex reads a redirect, which only a write answers with", where, name)
+				}
+			}
+		}
 		if op.Effect == EffectWrite {
 			if req.FormPage == nil {
 				add("%s: an http.form_html write needs request.form_page, so the form is checked before sending", where)

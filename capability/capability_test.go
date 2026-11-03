@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -307,5 +308,67 @@ func TestBrokerAcceptsLargestOutcome(t *testing.T) {
 	out := b.Execute(ectx, capability.Job{Binding: "alice", OpRef: ref})
 	if out.Dispatch != capability.Sent || len(out.Body) != capability.MaxBody {
 		t.Fatalf("got dispatch=%s code=%s body=%d, want sent with %d bytes", out.Dispatch, out.Code, len(out.Body), capability.MaxBody)
+	}
+}
+
+// formPage answers the form page itself; everything else is the session check.
+type formPage struct {
+	page
+	headers map[string]string
+	err     error
+}
+
+func (p *formPage) Fetch(ctx context.Context, in *integration.Compiled, r capability.FetchRequest) (capability.FetchResult, error) {
+	if !strings.HasSuffix(r.URL, "/notes/new") {
+		return p.page.Fetch(ctx, in, r)
+	}
+	p.headers = r.Headers
+	return capability.FetchResult{}, p.err
+}
+
+func formHost(t *testing.T, p capability.Page) (*capability.Host, *integration.Compiled) {
+	t.Helper()
+	raw, err := os.ReadFile("../integration/testdata/notes-form.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	session := m["session"].(map[string]any)
+	session["extract"] = map[string]any{"csrf": map[string]any{"request": map[string]any{"method": "GET", "path": "/api/me"}, "json_pointer": "/csrf"}}
+	session["request_headers"] = map[string]string{"X-CSRF-Token": "{{session.csrf}}"}
+	raw, err = json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := integration.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := capability.NewHost(capability.HostConfig{
+		ID: "h", Integrations: []*integration.Compiled{in}, MaxQueue: 1,
+		Bindings: []capability.HostBinding{{Name: "alice", Page: p, Grants: map[string][]string{in.ID: {"create_note"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h, in
+}
+
+func TestHostFormPage(t *testing.T) {
+	t.Parallel()
+	p := &formPage{err: capability.ErrBodyTooLarge}
+	h, in := formHost(t, p)
+	out := h.Execute(context.Background(), capability.Job{
+		OpRef:   capability.OpRef{IntegrationID: in.ID, Version: in.Version, ArtifactSHA256: in.Hash, Operation: "create_note"},
+		Binding: "alice", Input: map[string]any{"title": "t"}, Marker: "m",
+	})
+	if out.Dispatch != capability.NotSent || out.Code != capability.CodeSourceChanged {
+		t.Errorf("a form page over the limit: got %+v, want not sent with %s", out, capability.CodeSourceChanged)
+	}
+	if p.headers["X-CSRF-Token"] != "c-1" {
+		t.Errorf("the form page fetch has headers %v, want the session's", p.headers)
 	}
 }
