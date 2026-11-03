@@ -1,0 +1,241 @@
+{
+  "format": "daraja.integration/v1alpha1",
+  "id": "synthetic-notes-steps",
+  "version": "1",
+  "description": "Synthetic notes application driven through its visible interface.",
+  "source": {
+    "kind": "web",
+    "origin": "http://127.0.0.1:1"
+  },
+  "session": {
+    "provider": "browser",
+    "browser_sign_in": [
+      {
+        "navigate": "/login"
+      },
+      {
+        "fill": "input[name=user]",
+        "value": "{{credential.username}}"
+      },
+      {
+        "fill": "input[name=pass]",
+        "value": "{{credential.password}}"
+      },
+      {
+        "click": "button[type=submit]"
+      },
+      {
+        "wait_path_not": "/login"
+      }
+    ],
+    "signed_in": {
+      "request": {
+        "method": "GET",
+        "path": "/api/me"
+      },
+      "json_pointer": "/user/id",
+      "not_null": true
+    }
+  },
+  "operations": [
+    {
+      "name": "get_note",
+      "description": "Read one note from its page.",
+      "effect": "read",
+      "execution": "browser.steps",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        }
+      },
+      "response": {
+        "extract": {
+          "id": {
+            "css": "article",
+            "attr": "data-id"
+          },
+          "title": {
+            "css": "article h1"
+          },
+          "body": {
+            "css": "article p"
+          }
+        }
+      },
+      "steps": [
+        {
+          "navigate": "/notes/{{input.id}}"
+        },
+        {
+          "wait_for": "article"
+        }
+      ]
+    },
+    {
+      "name": "find_note_by_ref",
+      "description": "Find a note in the list by its reference.",
+      "effect": "read",
+      "execution": "browser.steps",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "ref"
+        ],
+        "properties": {
+          "ref": {
+            "type": "string"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          }
+        }
+      },
+      "response": {
+        "extract": {
+          "id": {
+            "css": "small.ref",
+            "attr": "data-id",
+            "text": "{{input.ref}}"
+          }
+        }
+      },
+      "steps": [
+        {
+          "navigate": "/notes"
+        },
+        {
+          "wait_for": "ul#notes"
+        }
+      ]
+    },
+    {
+      "name": "create_note",
+      "description": "Create a note through its form.",
+      "effect": "write",
+      "destructive": false,
+      "execution": "browser.steps",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          }
+        }
+      },
+      "response": {
+        "extract": {
+          "id": {
+            "css": "article",
+            "attr": "data-id",
+            "text": "{{receipt.marker}}"
+          }
+        },
+        "identifier": "id",
+        "refused_when": [
+          {
+            "css": "p.error"
+          }
+        ]
+      },
+      "reconcile": {
+        "strategy": "marker",
+        "operation": "find_note_by_ref",
+        "input": {
+          "ref": "{{receipt.marker}}"
+        },
+        "found": "/id"
+      },
+      "steps": [
+        {
+          "navigate": "/notes/new"
+        },
+        {
+          "fill": "input[name=title]",
+          "value": "{{input.title}}",
+          "expect": [
+            {
+              "css": "h1",
+              "text": "New note"
+            },
+            {
+              "css": "form#new-note"
+            }
+          ]
+        },
+        {
+          "fill": "textarea[name=body]",
+          "value": "{{input.body}}"
+        },
+        {
+          "fill": "input[name=ref]",
+          "value": "{{receipt.marker}}"
+        },
+        {
+          "click": "button[type=submit]",
+          "commit": true,
+          "expect": [
+            {
+              "css": "form#new-note"
+            }
+          ]
+        },
+        {
+          "wait_path_not": "/notes/new"
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "built_by": "hand-authored test fixture"
+  }
+}

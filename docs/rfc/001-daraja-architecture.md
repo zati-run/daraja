@@ -1,6 +1,6 @@
 # RFC 001: Daraja architecture
 
-- **Status:** Draft, revision 8. Not accepted.
+- **Status:** Draft, revision 9. Not accepted.
 - **Date:** 2026-10-31
 - **Owner:** David Ndungu
 - **Repository:** `github.com/zati-run/daraja`
@@ -42,6 +42,68 @@ The owner answered the questions that blocked acceptance on 2026-10-31:
 As a consequence, this revision moves `http.form_html` and `browser.steps`
 from phase 1a to phase 2 (a **[Proposal]**). They stay in the artifact format
 and on the ladder, but v1 doesn't implement them. See [Phased scope](#phased-scope).
+
+### Revision 9 changes (`browser.steps`)
+
+`browser.steps` is implemented as [Integration artifact](#integration-artifact)
+describes, with these **[Proposal]** details:
+
+- **Steps** are `navigate`, `fill`, `select`, `click` (optionally with a `text`
+  anchor), `wait_for` and `wait_path_not`. It needs the `browser` session
+  provider.
+- **Actions are scripted in the page.** `fill` sets a text field's value and
+  fires `input` and `change`, `select` does the same, and `click` calls the
+  element's `click()`. No key press or mouse event is sent, so a value can't
+  submit a form, and focus or scrolling can't send an action elsewhere. An
+  application that checks `isTrusted`, or that reads key or mouse events, won't
+  respond. After a commit step, that's `uncertain`, and reconcile settles it.
+- **Targets.** A step acts on the first shown, enabled match. A `click` also
+  needs the element's center to land on it, so a covered element isn't clicked.
+  The origin and the step's `expect` are read in the same synchronous evaluation
+  that finds the element and acts on it.
+- **Isolated world.** Every check and action runs in a fresh isolated world of
+  the current document, so a page that replaces a built-in can't change what they
+  see or return, and a navigation makes the call fail rather than run elsewhere.
+  The final page and its URL are read in one such evaluation. The page's own
+  handlers still run, and they can do anything the page can.
+- **At most once.** Only looking for a target is retried. If the evaluation that
+  acts fails, the action may have run, so it isn't repeated.
+- **Commit step.** A write has exactly one `commit: true`, on a `click` or a
+  `navigate`. A failure before it, or in its own `expect` check, is
+  `failed/not_sent`, because the commit action hasn't started. Any failure once
+  that action starts is `uncertain`. A declared refusal on the final page is
+  `failed/sent`. An anchored commit step needs `expect`. The author declares
+  that steps before the commit step have no effect; Daraja can't check that.
+- **Reads.** A read that fills, selects or clicks needs `reviewed_safe_method`,
+  as a read using an unsafe HTTP method does. A read made of `navigate` and
+  waits doesn't.
+- **Drift guard.** Every step's `expect` and origin are checked before it acts,
+  also after the commit step, retried until the step's timeout (15 s) because
+  pages render late. A `navigate` checks only `expect` and a `wait_path_not`
+  checks them apart from what it waits for, since neither acts on an element. A mismatch or a selector that never appears is
+  `source_changed` before the commit action and `uncertain` after it, and the
+  host drops its cached session, because the page may be a sign-in page.
+- **Outcome.** The answer is the final page and its URL. `response.extract` and
+  `response.refused_when` read them with the same code as `http.form_html`, and
+  a write must declare `response.identifier`. No identifier and no declared
+  refusal is `uncertain`.
+- **Proof of the write.** An application can end on a page that has nothing to
+  do with this write, so the identifier must come from a CSS extract whose `text`
+  anchor shows what the write typed: `{{receipt.marker}}` for a marker-reconciled
+  write, an `{{input.x}}` value otherwise. An input value is only as unique as
+  the caller makes it. A marker-reconciled write must type the marker with a
+  `fill` before the commit step. This means the application must show the marker
+  on the page the plan ends on.
+- **Failure text.** Scripts answer with fixed codes. A failed step reports its
+  step number and what the artifact declared, never a browser or script message,
+  because those can hold page text.
+
+Not done: no write has run through `browser.steps` on a real application.
+`fill` and `select` target form fields; a rich-text editor isn't tested, and
+`fill` refuses an element without a text `value`. A plan can't tell a missing
+record from a redesign, so both report `source_changed`. Page dialogs aren't
+handled, so one blocks the plan until the step's timeout. The planner doesn't
+propose this kind.
 
 ### Revision 8 changes (`http.form_html`)
 
@@ -566,7 +628,7 @@ capabilities. The runtime↔capability protocol is named and authenticated.
 |---|---|---|
 | `http.json` | In-page through the browser capability (the default under D-14), or in the runtime when the session may be used there | Both placements are v1 scope. |
 | `http.form_html` | As above | Implemented; qualified only on a synthetic application. |
-| `browser.steps` | Host browser capability with a headed, persistent profile | Phase 2 |
+| `browser.steps` | Host browser capability with a headed, persistent profile | Implemented; see [Evidence status](#evidence-status). |
 | `desktop.native` | A long-lived native environment that owns permissions and a user session | Not implemented, not claimed |
 
 A visual desktop action isn't an HTTP API. It isn't exposed through OpenAPI
@@ -599,8 +661,8 @@ search page, so UI writes aren't forced to `none`.
 
 - **Commit step.** Every write plan marks exactly one step `commit: true`,
   which is validated at load.
-  - A failure before that step is `failed/not_sent`.
-  - A failure at or after it, or a lost answer, is `uncertain`.
+  - A failure before that step's action starts is `failed/not_sent`.
+  - A failure once that action starts, or a lost answer, is `uncertain`.
   - A declared `refused_when` extract matching after it is `failed/sent`.
 - **Drift guard.** Steps may declare `expect` assertions (an element is
   present, or anchor text equals a value).
@@ -829,7 +891,7 @@ file lives outside this repository, so the owner records the row (U-4).
 - **Phase 1b:** Zendesk's internal API, one read and one write.
 - **Phase 1c:** Nanos as scheduler and broker (A12, A13).
 - **Phase 2:** `http.form_html` and `browser.steps` (with commit step and
-  drift guard), the model-backed planner adapter, an OpenAPI facade, signed
+  drift guard), both implemented; the model-backed planner adapter, an OpenAPI facade, signed
   list cursors, Ferro as a capability candidate, `browser_lease` where
   qualified.
 - **Phase 3:** a `desktop.native` capability (for example Comuse), with its
@@ -887,7 +949,7 @@ file lives outside this repository, so the owner records the row (U-4).
 | Leased cookies from another egress | Not tested. The peer review predicts a challenge (403). |
 | Zendesk sign-in through the capability recipe | **[Evidence]** 2026-11-01: `daraja signin` in headed Chrome with a dedicated profile passed the challenge and the password. The owner entered the emailed passcode at `/auth/v3/tsv`, and the profile kept the session for all later runs (explore, record, capability). The first passcode expired while waiting, and a restarted sign-in sent a new one. The login page is `/auth/v3/signin`, not `/access/login`. |
 | Source implementation at Revision 6 (historical; since committed, and later revisions add to it) | Phase 1a as revised: the capability contract (outbound long-poll, `op_ref` with artifact hash and version, legal outcomes, broker withdraw/lost semantics), a headed-browser capability host with an in-page `fetch` executor and non-blocking recovery, the `browser` provider, required `destructive`, `reviewed_safe_method` reads, OAuth 2.1 with CIMD (consent as grant, PKCE S256, rotating refresh, persisted hashes, SSRF-guarded metadata fetch), condition-based explorer settling and demonstrate steps (`daraja record`), and `daraja capability`. Not implemented: `http.form_html`, `browser.steps`, salted value correlation in the recorder, an OAuth grant management UI. |
-| Synthetic tests | **[Evidence]** 2026-11-01, macOS arm64, Go 1.27.3, `go test -race ./...`: 52 top-level tests and 65 subtests pass, none fail (counted 2026-11-01 after Revision 6, its R1, R2 and R2b fixes, and the merge-review fixes). They cover:<br>• OAuth: an SDK OAuth client that identifies itself only by a CIMD URL; receipt scope surviving re-consent; refresh-token reuse revoking the grant; consent lockout across requests; public-address filtering.<br>• Capability: read, write and duplicate; re-sign-in after the source session expires; `session_needs_human` in under 15 s; `capability_unavailable`.<br>• Writes: a lost capability answer is `uncertain`, a retry doesn't re-dispatch, and reconcile finds the effect. A redirected write is `uncertain` on both the in-process and the in-page paths. An idempotency key reused with different input is a conflict.<br>• Other: runtime URL checks and pinning; 8 MiB outcome delivery; the pending human-step guard (real Chrome); synthetic-only credentials without a mode check; GraphQL read-only classification (26 cases, including a `Query`-cased key hiding a mutation, repeated keys and trailing data); a GraphQL GET with a repeated or case-variant `query` parameter blocked; a GraphQL POST with a URL query string blocked; a method-override header or `_method` parameter blocked; inline literals redacted from recorded query documents; a GraphQL query let through and a GraphQL mutation blocked in a read-only walk; a second tab's read recorded and its write blocked; a read-only walk blocking a form posted to a new window, a new window that writes at once, a worker, a beacon, a GraphQL mutation over GET, a hash-only persisted query over GET, an `<a ping>`, a service-worker fetch, and a WebSocket from a page, a dedicated worker, a nested worker, a shared worker and a cross-site frame, each with a writes-allowed control.<br>Each review regression test was confirmed to fail on the earlier code.<br>**Flake, found and fixed:** the reviewer saw `builder` fail in 1 of 7 full runs, and it was reproduced here (1 of 8 stressed runs, plus 1 of 3 concurrent full runs). The explorer lost an observation, here `GET /api/notes/1`, so no `get_note` was planned. Cause: the sent, response and finished network events arrive on separate subscriptions handled by separate goroutines. A request whose "finished" event was handled before its "sent" or "response" event was dropped or shaped without a status. The recorder now merges the three events per request and records it only when all three are in. After the fix: 12 stressed runs of `builder` (48 test runs) and 3 concurrent full runs pass.<br>**Journal:** a torn final line is now truncated at open, so the next append can't fuse onto it. The regression test lost the next receipt without the fix. |
+| Synthetic tests | **[Evidence]** 2026-11-01, macOS arm64, Go 1.27.3, `go test -race ./...`: 52 top-level tests and 65 subtests pass, none fail (counted 2026-11-01 after Revision 6, its R1, R2 and R2b fixes, and the merge-review fixes). On 2026-11-03, with `browser.steps` added, the same command ran 114 top-level tests and 161 subtests: all pass, none skipped. The list below is the 2026-11-01 coverage; Revisions 7 to 9 describe what they add. They cover:<br>• OAuth: an SDK OAuth client that identifies itself only by a CIMD URL; receipt scope surviving re-consent; refresh-token reuse revoking the grant; consent lockout across requests; public-address filtering.<br>• Capability: read, write and duplicate; re-sign-in after the source session expires; `session_needs_human` in under 15 s; `capability_unavailable`.<br>• Writes: a lost capability answer is `uncertain`, a retry doesn't re-dispatch, and reconcile finds the effect. A redirected write is `uncertain` on both the in-process and the in-page paths. An idempotency key reused with different input is a conflict.<br>• Other: runtime URL checks and pinning; 8 MiB outcome delivery; the pending human-step guard (real Chrome); synthetic-only credentials without a mode check; GraphQL read-only classification (26 cases, including a `Query`-cased key hiding a mutation, repeated keys and trailing data); a GraphQL GET with a repeated or case-variant `query` parameter blocked; a GraphQL POST with a URL query string blocked; a method-override header or `_method` parameter blocked; inline literals redacted from recorded query documents; a GraphQL query let through and a GraphQL mutation blocked in a read-only walk; a second tab's read recorded and its write blocked; a read-only walk blocking a form posted to a new window, a new window that writes at once, a worker, a beacon, a GraphQL mutation over GET, a hash-only persisted query over GET, an `<a ping>`, a service-worker fetch, and a WebSocket from a page, a dedicated worker, a nested worker, a shared worker and a cross-site frame, each with a writes-allowed control.<br>Each review regression test was confirmed to fail on the earlier code.<br>**Flake, found and fixed:** the reviewer saw `builder` fail in 1 of 7 full runs, and it was reproduced here (1 of 8 stressed runs, plus 1 of 3 concurrent full runs). The explorer lost an observation, here `GET /api/notes/1`, so no `get_note` was planned. Cause: the sent, response and finished network events arrive on separate subscriptions handled by separate goroutines. A request whose "finished" event was handled before its "sent" or "response" event was dropped or shaped without a status. The recorder now merges the three events per request and records it only when all three are in. After the fix: 12 stressed runs of `builder` (48 test runs) and 3 concurrent full runs pass.<br>**Journal:** a torn final line is now truncated at open, so the next append can't fuse onto it. The regression test lost the next receipt without the fix. |
 | Nanos boot (A12) | **[Evidence]** 2026-10-31, Spark pod on the DGX (Linux 6.17 aarch64), ops 0.1.47 (latest release), Nanos 0.1.56 arm64 (after `ops update --arm`; the release kernel was missing), qemu 7.2 with **KVM**: image 64 MiB (14 MiB allocated), runtime ELF 11.3 MB, build about 19 s, cold start to MCP `initialize` 470–590 ms. From that image: tools/list, five HTTPS reads to the fixture (4–10 ms warm, 135 ms first), `invalid_input`, scope denial, one write and a non-dispatching duplicate. |
 | Nanos volumes | **[Evidence]** ops 0.1.47 can't attach volumes on arm64: it adds `scsi-hd,bus=scsi0.0` but creates no virtio-scsi controller on the `virt` machine (`qemu/qemu_unix.go`). The run therefore uses a recorded fallback that puts the synthetic credentials and journal in the image, with `-unikernel-file-modes` because Nanos reports every file as mode 0777. Since revision 5, that mode refuses any credential binding not marked `synthetic`, so real credentials can't take this path. Pod images are deleted with the pod. |
 | Nanos crash recovery (A11 on Nanos) | **[Evidence] Passes after a fix (2026-11-01).** The first run failed: after qemu was killed mid-write and rebooted, the runtime loaded no receipts, so a retry re-sent the write and duplicated it in the fixture. A bisect (`deploy/nanos/durability-bisect.sh`) proved the cause wasn't flushing. The journal was in the image file after the kill, both `dispatching` and `succeeded` lines. The same image file was reused (sha256 unchanged, no rebuild), and the qemu drive had no `-snapshot` or cache option. The journal replayed through its `O_APPEND` handle, which on Nanos doesn't start reading at offset 0. It now replays through a separate read-only handle. Rerun on the same pod setup (KVM, ops 0.1.47, Nanos 0.1.56): with an immediate kill and a 10 s delayed kill, the receipt is found after reboot. In `nanos-run.sh`, with the VM killed during a write: the earlier receipt survives, `recovered_uncertain=1`, a retry with the same key isn't sent, reconcile finds the effect (`succeeded`), and `posts_final=2` (no duplicate). This is the in-image journal fallback, not a volume; a durable volume on arm64 remains unqualified. |
@@ -895,4 +957,5 @@ file lives outside this repository, so the owner records the row (U-4).
 | Real-target qualification (A14) | **[Evidence] Passes (2026-11-01).** The owner's Zendesk test account, reached only through the browser session: no official-API credentials and no API token.<br>**Discovery.** A read-only walk (with GraphQL queries allowed) and an owner demonstration recorded in every tab (164 observations). The agent UI reads through REST (`/api/v2/tickets/{id}`, `/api/lotus/tickets/{id}/conversations.json`, `/api/lotus/tickets/recent`, `/api/v2/search.json`). It writes through GraphQL mutations (`CreateIssueTicketMutation`, `UpdateTicketMutation`), which need the `apollographql-client-name`/`-version` headers. Introspection is disabled. The comment format enum (`PLAIN`) and the required `uploads` field came from validation errors, sent with `uploads` left out so no probe executed.<br>**Artifact** `zendesk-agent@1` (private, `private/zendesk/integrations/`): 5 reads and 2 writes. Both writes declare `marker` reconcile, as the deferred two-phase claim requires. `create_ticket` puts the marker in a ticket tag and reconciles through `find_ticket_by_tag`. `add_internal_note` (`isPublic:false`) puts it in the note text and reconciles through `find_ticket_by_text`. Each write's identifier is `/data/<mutation>/ticket/id`, and `settle_seconds` is 180.<br>**Run.** Runtime on the Mac (loopback, static operator token, not OAuth), the Mac capability in headed Chrome, and a non-SDK MCP client:<br>• Reads: 175–200 ms (search 400 ms).<br>• `add_internal_note`: 727 ms, and the note exists once, internal.<br>• `create_ticket`: 561 ms, and exactly one ticket was created.<br>• Same-key retries replayed in under 1 ms without sending. Different input on the same key returned `idempotency_key_conflict`.<br>• **Settle:** search found the note marker within 9 s and the tag marker within 6 s (upper bounds).<br>• **Failure path:** a note to a missing ticket got HTTP 200 with a GraphQL failure and no identifier. It was classified `outcome_uncertain`, not `succeeded`. Reconcile kept it uncertain inside the settle window and resolved it `not_applied` after.<br>• Logs: 30 executed jobs, no warnings, and no ticket content or markers.<br>**Not covered:** OAuth/CIMD for this client (D-15; OAuth is qualified only synthetically), a Nanos runtime for Zendesk, a session expiring mid-run, and drift of `apollographql-client-version` across Zendesk deploys. |
 | Read-only walk under the socket guards | **[Evidence]** 2026-11-02, same Zendesk account and profile, headed Chrome, the same walk task as A14. The session was still signed in. 131 observations and 431 requests, against 81 and 250 before the guards (the same task, so the runs aren't a controlled comparison). 120 writes were blocked. 3 cross-site frames or workers were held paused and reported as gaps. One blocked route seen earlier didn't recur (a billing experiment's `participation` POST). Of the routes the artifact uses, the walk saw `/api/v2/tickets/{id}`, `/api/v2/search.json` and `/api/graphql`. It didn't see `/api/lotus/tickets/{id}/conversations.json` or `/api/lotus/tickets/recent`. The earlier read-only walk didn't see them either; they came from the owner demonstration, so this walk doesn't show whether the guards affect them. That run predated the fix that stops pages before the guards end, so its held targets were released, and its last page kept running without the write guard, until the browser closed moments later. **Rerun with the fix,** 2026-11-03, same task, with the walk ending by stopping Chrome: 131 observations, 426 requests, 116 writes blocked, 3 targets held. No Chrome process stayed on that profile. Blocked and request counts vary from run to run, because the app chooses what to send. |
 | Client version and declared failure (Revision 7) | **[Evidence]** 2026-11-02, the owner's Zendesk test account, Mac runtime and capability in headed Chrome, static token, a non-SDK MCP client, artifact `zendesk-agent@3`.<br>• Client version read at session time: one read (about 300 ms) and one internal note (593 ms, `succeeded`, its retry replayed in under 1 ms without sending).<br>• A note to a missing ticket: `source_refused`, `failed` in 310 ms, against `uncertain` until the 180 s window before. A retry with the same key returned the final receipt without sending.<br>• Logs: no warnings.<br>**Not covered:** `create_ticket` declares the same failure shapes, but no failing create was sent, and `CreateOrUpdateTicketFailure` was never seen in an answer. |
+| `browser.steps` on a real application | **[Evidence]** 2026-11-02, the owner's Zendesk test account, Mac runtime and capability in headed Chrome, a non-SDK MCP client, one reviewed read that opens `/agent/tickets/{id}` and waits for the conversation. The existing ticket answered in 2.9 s with its ID from the URL and the conversation text from the page. A missing ticket answered `source_changed` after 16 s (the step's timeout). No log warnings. This read preceded the final step-runner changes and was not repeated on the current runner. **Not covered:** writes and the current runner on a real application. |
 | Deployed service | None. |

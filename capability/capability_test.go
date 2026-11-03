@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +39,10 @@ func (p *page) Fetch(ctx context.Context, in *integration.Compiled, r capability
 		}
 	}
 	return capability.FetchResult{Status: 200, Body: []byte(`{"note":{"id":1,"title":"Seed note"}}`)}, nil
+}
+
+func (p *page) RunSteps(context.Context, *integration.Compiled, []integration.Step) capability.StepsResult {
+	return capability.StepsResult{Err: errors.New("not used by these tests")}
 }
 
 func (p *page) Recover(context.Context, *integration.Compiled) error { return capability.ErrNeedsHuman }

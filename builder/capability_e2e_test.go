@@ -105,7 +105,7 @@ func startCapEnvFor(t *testing.T, fixture string, capTimeout time.Duration, edit
 
 	ctx, cancel := context.WithCancel(context.Background())
 	open := func(name string, creds map[string]string) *browser.Browser {
-		b, err := browser.Open(ctx, browser.Options{ProfileDir: filepath.Join(t.TempDir(), name), Headless: true, Credentials: creds})
+		b, err := browser.Open(ctx, browser.Options{ProfileDir: filepath.Join(t.TempDir(), name), Headless: true, Credentials: creds, StepTimeout: 3 * time.Second})
 		if err != nil {
 			cancel()
 			t.Skipf("Chrome is not available: %v", err)
@@ -361,5 +361,120 @@ func TestCapabilityFormWrite(t *testing.T) {
 	missing, res := call(t, c, tool("find_note_by_ref"), map[string]any{"ref": "dj-not-there"})
 	if res.IsError || missing["id"] != nil {
 		t.Fatalf("find missing: %s", res.Text())
+	}
+}
+
+func TestCapabilityBrowserSteps(t *testing.T) {
+	e := startCapEnvFor(t, "notes-steps.json", 60*time.Second)
+	c := mcpClient(t, e.rtURL, agentToken)
+	tool := func(op string) string { return mcpserver.ToolName("synthetic-notes-steps", op) }
+
+	out, res := call(t, c, tool("get_note"), map[string]any{"id": 1})
+	if res.IsError || out["title"] != "Seed note" || out["id"] != 1.0 {
+		t.Fatalf("read: %s", res.Text())
+	}
+
+	// One write through the interface, and a repeated key doesn't repeat it.
+	args := map[string]any{"title": "Steps note", "body": "typed", "idempotency_key": "s-1"}
+	out, res = call(t, c, tool("create_note"), args)
+	if res.IsError || out["id"] != 2.0 {
+		t.Fatalf("write: %s", res.Text())
+	}
+	out, res = call(t, c, tool("create_note"), args)
+	if res.IsError || out["id"] != 2.0 || e.app.Creates() != 1 {
+		t.Fatalf("replay: %s creates=%d", res.Text(), e.app.Creates())
+	}
+	note, res := call(t, c, tool("get_note"), map[string]any{"id": 2})
+	if res.IsError || note["title"] != "Steps note" || note["body"] != "typed" {
+		t.Fatalf("what the interface saved: %s", res.Text())
+	}
+
+	// The marker the plan typed can be found again.
+	rec, res := call(t, c, "daraja__receipt", map[string]any{"tool": tool("create_note"), "idempotency_key": "s-1"})
+	if res.IsError {
+		t.Fatalf("receipt: %s", res.Text())
+	}
+	found, res := call(t, c, tool("find_note_by_ref"), map[string]any{"ref": rec["marker"]})
+	if res.IsError || found["id"] != 2.0 {
+		t.Fatalf("find by marker: %s", res.Text())
+	}
+
+	// A page that doesn't show this write's marker is not this write, even
+	// though it's a real record with an identifier.
+	e.app.UnrelatedTitle = "Unrelated"
+	before := e.app.Creates()
+	_, res = call(t, c, tool("create_note"), map[string]any{"title": "Unrelated", "idempotency_key": "s-unrelated"})
+	if !res.IsError || !strings.Contains(res.Text(), journal.Uncertain) {
+		t.Fatalf("unrelated page: %s", res.Text())
+	}
+	e.app.UnrelatedTitle = ""
+	if e.app.Creates() != before {
+		t.Fatalf("creates = %d, want %d", e.app.Creates(), before)
+	}
+
+	// After the commit step, a declared refusal is failed.
+	_, res = call(t, c, tool("create_note"), map[string]any{"title": "", "idempotency_key": "s-2"})
+	if !res.IsError || !strings.Contains(res.Text(), "source_refused") || !strings.Contains(res.Text(), `"failed"`) {
+		t.Fatalf("declared refusal: %s", res.Text())
+	}
+
+	// Drift before the commit step sends nothing.
+	e.app.FormDrift = true
+	_, res = call(t, c, tool("create_note"), map[string]any{"title": "Drift", "idempotency_key": "s-3"})
+	if !res.IsError || !strings.Contains(res.Text(), capability.CodeSourceChanged) || !strings.Contains(res.Text(), `"failed"`) {
+		t.Fatalf("drift: %s", res.Text())
+	}
+	e.app.FormDrift = false
+	if e.app.Creates() != 1 {
+		t.Fatalf("creates after refusal and drift = %d, want 1", e.app.Creates())
+	}
+
+	// A session that expires while it is cached sends nothing, and the next
+	// call signs in again. The read first caches a session, because the drift
+	// above dropped it.
+	if _, res = call(t, c, tool("get_note"), map[string]any{"id": 1}); res.IsError {
+		t.Fatalf("read: %s", res.Text())
+	}
+	e.app.ExpireSessions()
+	_, res = call(t, c, tool("create_note"), map[string]any{"title": "Expired", "idempotency_key": "s-4"})
+	if !res.IsError || !strings.Contains(res.Text(), capability.CodeSourceChanged) || e.app.Creates() != 1 {
+		t.Fatalf("expired: %s creates=%d", res.Text(), e.app.Creates())
+	}
+	out, res = call(t, c, tool("create_note"), map[string]any{"title": "After sign-in", "idempotency_key": "s-5"})
+	if res.IsError || out["id"] != 3.0 || e.app.Creates() != 2 {
+		t.Fatalf("after sign-in: %s creates=%d", res.Text(), e.app.Creates())
+	}
+}
+
+// An answer lost after the commit step is uncertain, never re-sent, and
+// resolved from the list by its marker.
+func TestCapabilityBrowserStepsLostAfterCommit(t *testing.T) {
+	e := startCapEnvFor(t, "notes-steps.json", 60*time.Second)
+	e.app.SlowTitle, e.app.SlowFor = "Slow steps note", 6*time.Second
+	c := mcpClient(t, e.rtURL, agentToken)
+	tool := func(op string) string { return mcpserver.ToolName("synthetic-notes-steps", op) }
+	args := map[string]any{"title": "Slow steps note", "idempotency_key": "s-slow"}
+	_, res := call(t, c, tool("create_note"), args)
+	if !res.IsError || !strings.Contains(res.Text(), "uncertain") {
+		t.Fatalf("want uncertain, got %s", res.Text())
+	}
+	_, res = call(t, c, tool("create_note"), args)
+	if !res.IsError || !strings.Contains(res.Text(), "reconcile") {
+		t.Fatalf("retry: %s", res.Text())
+	}
+	var out map[string]any
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		out, res = call(t, c, "daraja__reconcile", map[string]any{"tool": tool("create_note"), "idempotency_key": "s-slow"})
+		if !res.IsError && out["state"] == journal.Succeeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reconcile: %s", res.Text())
+		}
+		time.Sleep(time.Second)
+	}
+	if e.app.Creates() != 1 {
+		t.Fatalf("creates = %d, want 1", e.app.Creates())
 	}
 }

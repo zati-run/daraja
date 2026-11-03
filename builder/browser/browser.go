@@ -25,7 +25,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
+	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
 	"github.com/zati-run/daraja/capability"
@@ -44,6 +47,8 @@ type Options struct {
 	Notify func(string)
 	// Credentials are typed by browser sign-in recipes. They are never logged.
 	Credentials map[string]string
+	// StepTimeout bounds one browser.steps step. Zero means 15 seconds.
+	StepTimeout time.Duration
 }
 
 // Browser is one Chrome instance with one tab.
@@ -90,6 +95,9 @@ func Open(parent context.Context, o Options) (*Browser, error) {
 	if o.HumanTimeout == 0 {
 		o.HumanTimeout = 10 * time.Minute
 	}
+	if o.StepTimeout == 0 {
+		o.StepTimeout = 15 * time.Second
+	}
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", o.Headless),
 		chromedp.UserDataDir(o.ProfileDir),
@@ -117,6 +125,22 @@ func (b *Browser) Close() {
 
 func (b *Browser) path() string {
 	loc, err := chromedp.Run(b.Ctx, chromedp.Location())
+	if err != nil {
+		return ""
+	}
+	u, err := url.Parse(loc)
+	if err != nil {
+		return ""
+	}
+	return u.Path
+}
+
+// pathWithin is path, bounded: a page still waiting for its server's answer
+// doesn't report its location, which would otherwise block without limit.
+func (b *Browser) pathWithin(d time.Duration) string {
+	ctx, cancel := context.WithTimeout(b.Ctx, d)
+	defer cancel()
+	loc, err := chromedp.Run(ctx, chromedp.Location())
 	if err != nil {
 		return ""
 	}
@@ -261,9 +285,15 @@ func (b *Browser) ensureSignedIn(ctx context.Context, in *integration.Compiled, 
 // is shown. It does not solve challenges; a visible browser lets the page
 // complete its own check.
 func (b *Browser) waitChallenge(ctx context.Context) error {
+	return waitChallengeOn(b.Ctx, ctx)
+}
+
+// waitChallengeOn asks the page through page, a browser context, and gives up
+// when ctx ends.
+func waitChallengeOn(page, ctx context.Context) error {
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
-		title, err := chromedp.Run(b.Ctx, chromedp.Title())
+		title, err := chromedp.Run(page, chromedp.Title())
 		if err != nil {
 			return err
 		}
@@ -282,7 +312,7 @@ func (b *Browser) waitChallenge(ctx context.Context) error {
 func (b *Browser) waitPathNot(ctx context.Context, prefix string, d time.Duration) error {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if p := b.path(); p != "" && !strings.HasPrefix(p, prefix) {
+		if p := b.pathWithin(time.Second); p != "" && !strings.HasPrefix(p, prefix) {
 			return nil
 		}
 		select {
@@ -511,6 +541,302 @@ func (b *Browser) watchRedirect(ctx context.Context, method, target, fragment st
 			}
 		}
 	}, nil
+}
+
+// errDrift marks a page that no longer matches a browser.steps plan.
+var errDrift = errors.New("the page no longer matches the plan")
+
+// errPlan marks a failure whose message Daraja wrote, so it may be reported.
+var errPlan = errors.New("the plan failed")
+
+// stepError keeps page text out of what a failed step reports. A script error
+// can carry anything the page chooses, and the message reaches logs and
+// receipts. Drift messages name only what the artifact declares.
+func stepError(err error) error {
+	switch {
+	case errors.Is(err, errDrift), errors.Is(err, errPlan):
+		return err
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return errors.New("the step timed out")
+	}
+	return errors.New("the browser call failed")
+}
+
+// RunSteps implements capability.Page. It stops at the first failure. It uses
+// scripted DOM changes and synthetic events, not trusted keyboard or pointer
+// input. Applications requiring trusted events may not respond, and page event
+// handlers can still cause side effects.
+func (b *Browser) RunSteps(ctx context.Context, in *integration.Compiled, steps []integration.Step) capability.StepsResult {
+	var res capability.StepsResult
+	fail := func(i int, err error) capability.StepsResult {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		res.Err = fmt.Errorf("step %d: %w", i, stepError(err))
+		res.Drift = errors.Is(err, errDrift)
+		return res
+	}
+	if b.humanActive() {
+		res.Err = capability.ErrHumanActive
+		return res
+	}
+	for i, st := range steps {
+		sctx, cancel := context.WithTimeout(b.Ctx, b.opts.StepTimeout)
+		stop := context.AfterFunc(ctx, cancel)
+		err := func() error {
+			if err := b.checkPage(sctx, in.Source.Origin, st); err != nil {
+				return err
+			}
+			if st.Commit {
+				// From here on, the effect may exist.
+				res.Committed = true
+			}
+			return b.runStep(sctx, in.Source.Origin, st)
+		}()
+		stop()
+		cancel()
+		if err != nil {
+			return fail(i, err)
+		}
+	}
+	rctx, cancel := context.WithTimeout(b.Ctx, b.opts.StepTimeout)
+	defer cancel()
+	stop := context.AfterFunc(ctx, cancel)
+	defer stop()
+	// One evaluation, in one document: the URL and the page can't disagree.
+	final, err := evalIsolated(rctx, `location.href + "\n" + document.documentElement.outerHTML`)
+	if err != nil {
+		return fail(len(steps), err)
+	}
+	loc, html, ok := strings.Cut(final, "\n")
+	if !ok {
+		return fail(len(steps), fmt.Errorf("%w: the final page could not be read", errPlan))
+	}
+	if !sameOrigin(loc, in.Source.Origin) {
+		return fail(len(steps), fmt.Errorf("%w: the plan ended on another origin", errDrift))
+	}
+	if len(html) > capability.MaxBody {
+		return fail(len(steps), fmt.Errorf("%w: the final page exceeds 8 MiB", errPlan))
+	}
+	res.Body, res.Location = []byte(html), loc
+	return res
+}
+
+func sameOrigin(loc, origin string) bool {
+	u, err := url.Parse(loc)
+	if err != nil {
+		return false
+	}
+	return u.Scheme+"://"+u.Host == origin
+}
+
+// evalIsolated runs a script in a fresh isolated world of the current document.
+// The world shares the page's DOM but none of its scripts, so a page that
+// replaces a built-in can't change what the script sees or returns. The world
+// ends with its document, so a navigation makes the call fail rather than run
+// on another page.
+func evalIsolated(ctx context.Context, script string) (string, error) {
+	tree, err := chromedp.Call(ctx, page.GetFrameTree, cdp.Empty{})
+	if err != nil {
+		return "", err
+	}
+	world, err := chromedp.Call(ctx, page.CreateIsolatedWorld, page.CreateIsolatedWorldParams{FrameID: tree.FrameTree.Frame.ID, WorldName: "daraja"})
+	if err != nil {
+		return "", err
+	}
+	byValue := true
+	res, err := chromedp.Call(ctx, cdpruntime.Evaluate, cdpruntime.EvaluateParams{Expression: script, ContextID: world.ExecutionContextID, ReturnByValue: &byValue})
+	if err != nil {
+		return "", err
+	}
+	if res.ExceptionDetails != nil {
+		return "", errors.New("the script failed")
+	}
+	var out string
+	if err := json.Unmarshal(res.Result.Value, &out); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// pageCheck is the part of every step's script that reads the origin and the
+// assertions. It answers with a fixed code, so no page text can come back.
+const pageCheck = `if (e.origin && location.origin !== e.origin) return "origin";
+  const bad = (e.expect || []).findIndex(x => ![...document.querySelectorAll(x.css)].some(n => !x.text || n.textContent.trim() === x.text));
+  if (bad >= 0) return "expect:" + bad;`
+
+// describe turns a script's code into what a failure reports, using only what
+// the artifact declares.
+func describe(code string, st integration.Step, css string) string {
+	switch code {
+	case "origin":
+		return "the page is on another origin"
+	case "missing":
+		return css + " did not appear"
+	case "field":
+		return css + " is not a field that can be filled"
+	case "value":
+		return css + " did not take the value"
+	case "option":
+		return css + " has no such option"
+	case "covered":
+		return css + " is covered"
+	}
+	if rest, ok := strings.CutPrefix(code, "expect:"); ok {
+		for i, e := range st.Expect {
+			if rest == fmt.Sprint(i) {
+				return e.CSS + " is not as expected"
+			}
+		}
+	}
+	return "the page did not answer as expected"
+}
+
+// checkPage runs before a step acts, also after the commit step: the page is on
+// the source origin, and the step's assertions hold. It retries until the step's
+// timeout, because a page may still be rendering.
+func (b *Browser) checkPage(ctx context.Context, origin string, st integration.Step) error {
+	if st.Navigate != "" && len(st.Expect) == 0 {
+		return nil
+	}
+	want := origin
+	if st.Navigate != "" {
+		want = "" // A navigate leaves the current page, wherever it is.
+	}
+	arg, err := json.Marshal(map[string]any{"origin": want, "expect": st.Expect})
+	if err != nil {
+		return err
+	}
+	script := fmt.Sprintf("((e) => {\n  %s\n  return \"ok\";\n})(%s)", pageCheck, arg)
+	last := "the page did not answer"
+	for {
+		code, err := evalIsolated(ctx, script)
+		if err == nil { // Otherwise a navigation is in progress; look again.
+			if code == "ok" {
+				return nil
+			}
+			last = describe(code, st, "")
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %s", errDrift, last)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// actScript checks the origin and the step's assertions, finds the first shown
+// element, and acts on it, all synchronously in one evaluation, so nothing on
+// the page can change between the check and the action. It targets the element
+// itself, so a moved focus or a scroll can't send the action elsewhere. A click
+// needs the element's center to land on it, so a covered element isn't clicked.
+// With e.act empty it only looks, and acts on nothing.
+const actScript = `((e) => {
+  ` + pageCheck + `
+  const shown = (n) => {
+    const r = n.getBoundingClientRect(), s = getComputedStyle(n);
+    return r.width > 0 && r.height > 0 && s.visibility === "visible" && !n.disabled;
+  };
+  const n = [...document.querySelectorAll(e.css)].find(n => shown(n) && (!e.text || n.textContent.includes(e.text)));
+  if (!n) return "missing";
+  const fire = () => {
+    n.dispatchEvent(new Event("input", {bubbles: true}));
+    n.dispatchEvent(new Event("change", {bubbles: true}));
+  };
+  if (e.act === "fill") {
+    const nope = ["checkbox", "radio", "file", "hidden", "submit", "button", "reset", "image", "range", "color"];
+    const field = n instanceof HTMLTextAreaElement || (n instanceof HTMLInputElement && !nope.includes(n.type));
+    if (!field || n.readOnly) return "field";
+    const norm = (s) => s.replace(/\r\n?/g, "\n");
+    n.focus();
+    n.value = e.value;
+    if (norm(n.value) !== norm(e.value)) return "value";
+    fire();
+  } else if (e.act === "select") {
+    if (!n.options || ![...n.options].some(o => o.value === e.value)) return "option";
+    n.value = e.value;
+    fire();
+  } else if (e.act === "click") {
+    n.scrollIntoView({block: "center", behavior: "instant"});
+    const r = n.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!hit || !n.contains(hit)) return "covered";
+    n.click();
+  }
+  return "ok";
+})(%s)`
+
+// actOnPage waits until the step's target is ready, then acts once. Only a look
+// is retried. If the action's evaluation fails, it may have run, so it is never
+// repeated; the failure stands, and after a commit step that's uncertain.
+func actOnPage(sctx context.Context, origin, act string, st integration.Step, css string) error {
+	script := func(act string) (string, error) {
+		arg, err := json.Marshal(map[string]any{"origin": origin, "act": act, "css": css, "text": st.Text, "value": st.Value, "expect": st.Expect})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf(actScript, arg), nil
+	}
+	look, err := script("")
+	if err != nil {
+		return err
+	}
+	do, err := script(act)
+	if err != nil {
+		return err
+	}
+	why := css + " did not appear"
+	for {
+		code, err := evalIsolated(sctx, look)
+		if err == nil {
+			if code == "ok" {
+				if act == "" {
+					return nil
+				}
+				if code, err = evalIsolated(sctx, do); err != nil {
+					return err
+				}
+				if code == "ok" {
+					return nil
+				}
+				if code == "value" {
+					return fmt.Errorf("%w: %s", errDrift, describe(code, st, css))
+				}
+			}
+			why = describe(code, st, css)
+		}
+		select {
+		case <-sctx.Done():
+			return fmt.Errorf("%w: %s", errDrift, why)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// runStep performs one action. A selector that never appears is drift.
+func (b *Browser) runStep(sctx context.Context, origin string, st integration.Step) error {
+	switch {
+	case st.Navigate != "":
+		if err := chromedp.Do(sctx, chromedp.Navigate(origin+st.Navigate)); err != nil {
+			return err
+		}
+		return waitChallengeOn(sctx, sctx)
+	case st.Fill != "":
+		return actOnPage(sctx, origin, "fill", st, st.Fill)
+	case st.Select != "":
+		return actOnPage(sctx, origin, "select", st, st.Select)
+	case st.Click != "":
+		return actOnPage(sctx, origin, "click", st, st.Click)
+	case st.WaitFor != "":
+		return actOnPage(sctx, origin, "", st, st.WaitFor)
+	case st.WaitPathNot != "":
+		d := b.opts.StepTimeout
+		if err := b.waitPathNot(sctx, st.WaitPathNot, d); err != nil {
+			return fmt.Errorf("%w: %v", errDrift, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: a step has no action", errPlan)
 }
 
 // onOrigin navigates to the origin when the page is elsewhere.

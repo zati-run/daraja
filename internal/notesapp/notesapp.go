@@ -22,7 +22,10 @@ type App struct {
 	// SlowTitle makes a create with this title commit, then wait before
 	// answering, so tests can lose or interrupt the response.
 	SlowTitle string
-	SlowFor   time.Duration
+	// UnrelatedTitle makes a create with this title create nothing and go to
+	// the first note's page, an answer with an identifier that isn't this write.
+	UnrelatedTitle string
+	SlowFor        time.Duration
 	// FormPadding adds this many bytes before the note form's closing tag.
 	FormPadding int
 	// FormDrift renames the note form's title field, as a redesign would.
@@ -247,7 +250,7 @@ func (a *App) notesHTML(w http.ResponseWriter, r *http.Request) {
 		}
 		return `<!doctype html><html><body><h1>New note</h1>` + problem + `<form id="new-note" method="post" action="/notes">
 <input type="hidden" name="csrf" value="c-` + sid + `">
-<input name="` + title + `"><textarea name="body"></textarea><input type="hidden" name="ref" value="">
+<input name="` + title + `"><textarea name="body"></textarea><input name="ref" value="">
 <select name="color"><option value="plain" selected>Plain</option><option value="red">Red</option></select>
 <button type="submit" name="save" value="1">Save</button>` + strings.Repeat(" ", a.FormPadding) + `</form></body></html>`
 	}
@@ -272,6 +275,10 @@ func (a *App) notesHTML(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, form("Title is required"))
 			return
 		}
+		if a.UnrelatedTitle != "" && r.FormValue("title") == a.UnrelatedTitle {
+			http.Redirect(w, r, "/notes/1", http.StatusSeeOther)
+			return
+		}
 		a.mu.Lock()
 		n := Note{ID: len(a.notes) + 1, Title: r.FormValue("title"), Body: r.FormValue("body"), Ref: r.FormValue("ref")}
 		a.notes = append(a.notes, n)
@@ -291,7 +298,7 @@ func (a *App) notesHTML(w http.ResponseWriter, r *http.Request) {
 		defer a.mu.Unlock()
 		for _, n := range a.notes {
 			if n.ID == id {
-				fmt.Fprintf(w, `<!doctype html><html><body><article data-id="%d"><h1>%s</h1><p>%s</p></article></body></html>`, n.ID, html.EscapeString(n.Title), html.EscapeString(n.Body))
+				fmt.Fprintf(w, `<!doctype html><html><body><article data-id="%d"><h1>%s</h1><p>%s</p><small class="ref">%s</small></article></body></html>`, n.ID, html.EscapeString(n.Title), html.EscapeString(n.Body), html.EscapeString(n.Ref))
 				return
 			}
 		}
