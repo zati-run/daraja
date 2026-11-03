@@ -28,6 +28,12 @@ const refusedArtifact = `{
      "request": {"method": "POST", "path": "/gql", "body": {"query": "mutation { a }", "ref": "{{receipt.marker}}"}},
      "response": {"success_status": [200], "output": {"id": "/data/a/id"}, "identifier": "/data/a/id",
        "refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}, {"json_pointer": "/data/ok", "equals": "false"}, {"json_pointer": "/errors/0/detail", "contains": "NOT_FOUND"}, {"json_pointer": "/data/code", "equals": "9007199254740992"}, {"json_pointer": "/data/flag", "contains": "false"}]},
+     "reconcile": {"strategy": "marker", "operation": "lookup", "found": "/id", "settle_seconds": 3600}},
+    {"name": "plain", "description": "Write with no identifier.", "effect": "write", "destructive": false,
+     "input_schema": {"type": "object"}, "output_schema": {"type": "object"},
+     "request": {"method": "POST", "path": "/gql", "body": {"query": "mutation { b }", "ref": "{{receipt.marker}}"}},
+     "response": {"success_status": [200], "output": {"ok": "/data/ok"},
+       "refused_when": [{"json_pointer": "/data/ok", "equals": "false"}]},
      "reconcile": {"strategy": "marker", "operation": "lookup", "found": "/id", "settle_seconds": 3600}}
   ]}`
 
@@ -47,7 +53,7 @@ func refusalRuntime(t *testing.T, answer string) (*Runtime, *Principal) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { j.Close() })
-	p := Principal{ID: "p", TokenSHA256: HashToken("t"), Grants: []Grant{{Integration: "refusals", Operations: []string{"lookup", "update"}}}}
+	p := Principal{ID: "p", TokenSHA256: HashToken("t"), Grants: []Grant{{Integration: "refusals", Operations: []string{"lookup", "update", "plain"}}}}
 	r, err := New(Config{Integrations: []*integration.Compiled{in}, Principals: []Principal{p}, Journal: j})
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +114,45 @@ func TestReadRefusesDeclaredFailure(t *testing.T) {
 	if e == nil || e.Code != CodeSourceRefused {
 		b, _ := json.Marshal(e)
 		t.Fatalf("error = %s, want %s", b, CodeSourceRefused)
+	}
+}
+
+func TestWriteWithoutIdentifierKeepsUnreadableAnswersUncertain(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, answer, state string }{
+		{"declared failure", `{"data":{"ok":false}}`, journal.Failed},
+		{"number out of float range", `{"data":{"ok":false},"extra":1e400}`, journal.Uncertain},
+		{"closing bracket after the JSON", `{"data":{"ok":false}}]`, journal.Uncertain},
+		{"no declared failure", `{"data":{"ok":true}}`, journal.Succeeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r, p := refusalRuntime(t, tc.answer)
+			res, e := r.Invoke(context.Background(), p, "refusals", "plain", nil, "key")
+			var rec *journal.Receipt
+			if e != nil {
+				rec = e.Receipt
+			} else {
+				rec = res.Receipt
+			}
+			if rec == nil || rec.State != tc.state {
+				t.Fatalf("receipt = %+v, want state %s", rec, tc.state)
+			}
+		})
+	}
+}
+
+// A reconcile read that can't be parsed must fail, not read as "not found".
+func TestReadRefusesUnreadableAnswer(t *testing.T) {
+	t.Parallel()
+	for _, answer := range []string{`{"data":{"a":{"id":7}}}]`, `{"data":{"a":{"id":7}},"extra":1e400}`} {
+		r, p := refusalRuntime(t, answer)
+		_, e := r.Invoke(context.Background(), p, "refusals", "lookup", nil, "")
+		if e == nil || e.Code != CodeInvalidOutput {
+			b, _ := json.Marshal(e)
+			t.Errorf("answer %s: error = %s, want %s", answer, b, CodeInvalidOutput)
+		}
 	}
 }
 

@@ -52,11 +52,12 @@ These are **[Proposal]** changes the owner hasn't separately decided:
   and exactly one of `equals` and `contains`. A matching write is `failed` at
   once, and a matching read returns `source_refused`. An answer that matches and
   also carries the declared identifier contradicts itself, so the write stays
-  `uncertain`. An undeclared failure stays `uncertain` if the operation declares
-  an identifier, as before. A write that declares no identifier and no output
-  can't tell a failure from success, so a success status still records
-  `succeeded`. `equals` compares a number as sent, and `contains` applies only
-  to a string, so a near match stays `uncertain`.
+  `uncertain`. `equals` compares a number as sent, and `contains` applies only
+  to a string. An answer that matches no entry is handled as before: without
+  its declared identifier the write stays `uncertain`, and if the operation
+  declares no identifier, a success status records `succeeded`, so such a write
+  can't detect a failure nobody declared. If it declares an output or
+  `refused_when`, a body that doesn't decode stays `uncertain`.
 - **Revision 6's example was wrong for this case.** A note to a missing ticket
   doesn't answer `CreateOrUpdateTicketFailure`. It answers HTTP 200 with `data`
   null and a generic `INTERNAL_SERVER_ERROR`, and the `RESOURCE_NOT_FOUND` code
