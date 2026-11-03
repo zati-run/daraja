@@ -311,7 +311,8 @@ func (r *recorder) add(method, path string, query url.Values, resType string, st
 }
 
 // Explore runs a task's walk in a signed-in browser and records
-// observations. creds are used only for the sign-in recipe.
+// observations. creds are used only for the sign-in recipe. A read-only walk
+// closes b when it ends; open the profile again to use it after that.
 func Explore(ctx context.Context, b *browser.Browser, task *Task, signIn *integration.Compiled, creds map[string]string) (*Report, error) {
 	return ExploreWith(ctx, b, task, signIn, creds, Options{})
 }
@@ -342,6 +343,8 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	var sg *socketGuard
 	if readOnly {
 		sg = newSocketGuard(b.Ctx, lctx, &wg)
+		// Runs before the deferred cancel, on every return.
+		defer b.Close()
 	}
 	// listen records one tab's traffic. Each tab has its own CDP session,
 	// so request IDs are keyed by tab. Writes are guarded browser-wide
@@ -588,21 +591,14 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	walkErr := runWalk(ctx, b, task, rec, signIn, o)
 	unsettled := !rec.settle(ctx, o)
 	rec.pending.Wait()
-	// A read-only walk's guards end with it, but its pages would keep running:
-	// timers could write, and a released frame could load with its sockets. So
-	// everything is stopped first, while the guards still hold.
-	browserClosed := false
-	if readOnly && !stopPages(ctx, b, sg) {
-		// Cancelling below would detach and so release whatever is left. Only
-		// closing the browser can't let anything run.
+	// A read-only walk ends by stopping Chrome, while its guards still hold, so
+	// no page, frame, worker or pending navigation outlives them. Anything less
+	// has to find everything a page left running, and can miss something.
+	if readOnly {
 		b.Close()
-		browserClosed = true
 	}
 	cancel()
 	wg.Wait()
-	if readOnly && !browserClosed {
-		sg.disarm(b.Ctx)
-	}
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -639,16 +635,13 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	tabsMu.Unlock()
 	if readOnly {
 		sg.mu.Lock()
-		if n := sg.heldEver; n > 0 {
+		if n := len(sg.held); n > 0 {
 			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d cross-site frame(s) or worker(s) were held paused so they could not open sockets; they did not load and their traffic was not recorded", n))
 		}
 		if sg.running > 0 {
 			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d frame(s) or worker(s) were already running when Daraja attached; they keep socket constructors, and socket frames are not checked by the write guard", sg.running))
 		}
 		sg.mu.Unlock()
-		if browserClosed {
-			rep.Coverage.Gaps = append(rep.Coverage.Gaps, "a page, frame or service worker could not be stopped for good when the walk ended, so the browser was closed")
-		}
 		if unarmedTabs > 0 {
 			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d tab(s) could not be fully attached; their sockets and workers were not disabled", unarmedTabs))
 		}
@@ -757,62 +750,6 @@ const noSocketsJS = `(() => {
     try { Object.defineProperty(globalThis, name, {value: refuse, writable: false, configurable: false}); } catch (e) {}
   }
 })();`
-
-// stopPages ends everything a read-only walk started. The main tab goes first,
-// so it can't open more tabs; then every other tab is closed until none is left,
-// including any opened while this runs, and the main tab is sent back if one of
-// them navigated it. It reports whether all of it stopped.
-func stopPages(ctx context.Context, b *browser.Browser, sg *socketGuard) bool {
-	ok := true
-	nctx, ncancel := context.WithTimeout(b.Ctx, 10*time.Second)
-	defer ncancel()
-	if err := chromedp.Do(nctx, chromedp.Navigate("about:blank")); err != nil {
-		ok = false
-	}
-	main := chromedp.FromContext(b.Ctx).Target.TargetID
-	for clear := 0; clear < 3; {
-		res, err := chromedp.Call(nctx, target.GetTargets, target.GetTargetsParams{})
-		if err != nil {
-			return false
-		}
-		others := 0
-		for _, t := range res.TargetInfos {
-			if t.TargetID == main && t.URL != "about:blank" {
-				// A tab closed only just now may have navigated its opener.
-				others++
-				if err := chromedp.Do(nctx, chromedp.Navigate("about:blank")); err != nil {
-					ok = false
-				}
-			}
-			if t.Type == "page" && t.TargetID != main {
-				others++
-				if _, err := chromedp.Call(nctx, target.CloseTarget, target.CloseTargetParams{TargetID: t.TargetID}); err != nil && nctx.Err() != nil {
-					return false
-				}
-			}
-		}
-		if others > 0 {
-			clear = 0
-		} else {
-			clear++
-		}
-		select {
-		case <-nctx.Done():
-			return false
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-	sg.mu.Lock()
-	worker := sg.heldWorker
-	sg.mu.Unlock()
-	if worker {
-		return false
-	}
-	if err := sg.stopServiceWorkers(b.Ctx); err != nil {
-		ok = false
-	}
-	return sg.waitHeldGone(ctx, 5*time.Second) == 0 && ok
-}
 
 // readSafe reports whether a read-only walk may send the request. GET and
 // HEAD pass, except on a GraphQL read path, where they pass only with a

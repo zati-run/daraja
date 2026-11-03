@@ -3,13 +3,18 @@ package builder_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/chromedp/chromedp"
 
 	"github.com/zati-run/daraja/builder/browser"
 	"github.com/zati-run/daraja/builder/explore"
@@ -62,7 +67,8 @@ func TestExplorePlanServeThroughBrowserLease(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	b, err := browser.Open(ctx, browser.Options{ProfileDir: filepath.Join(t.TempDir(), "profile"), Headless: true})
+	profile := filepath.Join(t.TempDir(), "profile")
+	b, err := browser.Open(ctx, browser.Options{ProfileDir: profile, Headless: true})
 	if err != nil {
 		t.Skipf("Chrome is not available: %v", err)
 	}
@@ -131,7 +137,13 @@ func TestExplorePlanServeThroughBrowserLease(t *testing.T) {
 
 	brokerToken := "synthetic-broker-token"
 	br := lease.New(runtime.HashToken(brokerToken), time.Minute, nil)
-	br.Add(&lease.Source{Integration: published, Browser: b, Credentials: creds})
+	// The read-only walk closed its browser; the lease opens the profile again.
+	leased, err := browser.Open(ctx, browser.Options{ProfileDir: profile, Headless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leased.Close()
+	br.Add(&lease.Source{Integration: published, Browser: leased, Credentials: creds})
 	brSrv := httptest.NewServer(br)
 	defer brSrv.Close()
 
@@ -344,13 +356,16 @@ func TestReadOnlyWalkBlocksEveryWriteVector(t *testing.T) {
 			t.Fatalf("explore: %v", err)
 		}
 		if len(effects) == 1 {
-			// Whatever the walk held back must stay stopped after it ends, for
-			// as long as the browser stays open.
-			time.Sleep(1500 * time.Millisecond)
+			// Nothing the walk held back may run after it: Chrome must be gone,
+			// and stay gone long enough for a late page to have written.
+			if err := chromedp.FromContext(b.Ctx).Browser.Process().Signal(syscall.Signal(0)); !errors.Is(err, os.ErrProcessDone) {
+				t.Errorf("Chrome is still running after a read-only walk: %v", err)
+			}
+			time.Sleep(2500 * time.Millisecond)
 		}
 		return app.Creates(), rep
 	}
-	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "wsworker", "wsnested", "wsshared", "wsframe", "ping", "sw", "latewrite", "latepopup", "latechurn", "lateopener"} {
+	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "wsworker", "wsnested", "wsshared", "wsframe", "ping", "sw", "latewrite", "latepopup", "latechurn", "lateopener", "latepending"} {
 		t.Run(vector, func(t *testing.T) {
 			// Control: with writes allowed, the vector really writes.
 			if n, _ := run(t, vector, []string{"read", "write"}); n == 0 {
