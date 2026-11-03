@@ -22,7 +22,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/andybalholm/cascadia"
 	"github.com/google/jsonschema-go/jsonschema"
+	"golang.org/x/net/html"
 )
 
 // Format is the only artifact format this package accepts.
@@ -149,12 +151,15 @@ type Operation struct {
 	// (for example a POST search or a GraphQL query). A reviewer sets it
 	// after confirming the request has no effect; the method alone never
 	// decides the effect class.
-	ReviewedSafeMethod bool            `json:"reviewed_safe_method,omitempty"`
-	InputSchema        json.RawMessage `json:"input_schema"`
-	OutputSchema       json.RawMessage `json:"output_schema"`
-	Request            RequestSpec     `json:"request"`
-	Response           ResponseSpec    `json:"response"`
-	Reconcile          *Reconcile      `json:"reconcile,omitempty"`
+	ReviewedSafeMethod bool `json:"reviewed_safe_method,omitempty"`
+	// Execution is how the operation runs: http.json (the default) or
+	// http.form_html.
+	Execution    string          `json:"execution,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	OutputSchema json.RawMessage `json:"output_schema"`
+	Request      RequestSpec     `json:"request"`
+	Response     ResponseSpec    `json:"response"`
+	Reconcile    *Reconcile      `json:"reconcile,omitempty"`
 }
 
 // RequestSpec is a request template.
@@ -168,16 +173,27 @@ type RequestSpec struct {
 	// omitted when the input is absent.
 	Body json.RawMessage   `json:"body,omitempty"`
 	Form map[string]string `json:"form,omitempty"`
+	// FormPage, for http.form_html, is fetched first. The submitted values are
+	// the form's own, with Form set over them.
+	FormPage *FormPage `json:"form_page,omitempty"`
 }
 
 // ResponseSpec maps a response to operation output.
 type ResponseSpec struct {
 	SuccessStatus []int `json:"success_status"`
 	// Output maps output field names to JSON Pointers into the response body.
-	Output map[string]string `json:"output"`
-	// Identifier is a JSON Pointer to the identifier of the record a write
-	// created or changed. It is stored in the receipt.
+	// http.form_html uses Extract instead.
+	Output map[string]string `json:"output,omitempty"`
+	// Extract names the outputs of http.form_html.
+	Extract map[string]Extract `json:"extract,omitempty"`
+	// Identifier names the record a write created or changed, and is stored in
+	// the receipt. It is a JSON Pointer for http.json, and the name of an
+	// Extract for http.form_html.
 	Identifier string `json:"identifier,omitempty"`
+	// RedirectSuccess, for an http.form_html write, is an anchored regular
+	// expression. A redirect to a local path and query matching it is success
+	// (post-redirect-get). Any other redirect stays uncertain.
+	RedirectSuccess string `json:"redirect_success,omitempty"`
 	// RefusedWhen lists answers that are definite failures even with a success
 	// status, such as a GraphQL failure sent with HTTP 200. An answer that
 	// matches one and also carries the declared identifier contradicts itself,
@@ -185,18 +201,26 @@ type ResponseSpec struct {
 	RefusedWhen []Refusal `json:"refused_when,omitempty"`
 }
 
-// Refusal matches a reviewed failure shape in a JSON response. It sets exactly
-// one of Equals and Contains.
+// Refusal matches a reviewed failure shape in a response: a JSON value, or an
+// HTML element.
 type Refusal struct {
-	JSONPointer string `json:"json_pointer"`
-	// Equals is compared with the scalar at JSONPointer as a string, so
-	// "false" matches JSON false and "7" matches JSON 7. A number must match as
-	// sent: "7" doesn't match 7.0.
+	// JSONPointer needs exactly one of Equals and Contains.
+	JSONPointer string `json:"json_pointer,omitempty"`
+	// CSS matches when an element exists. With Equals or Contains, the
+	// element's text must also match.
+	CSS string `json:"css,omitempty"`
+	// Equals is compared with the value as a string, so "false" matches JSON
+	// false and "7" matches JSON 7. A number must match as sent: "7" doesn't
+	// match 7.0.
 	Equals string `json:"equals,omitempty"`
-	// Contains matches a substring of the string at JSONPointer, for a failure
-	// code nested in an error's text. Keep it specific: a broad match can class
-	// an applied write as refused.
+	// Contains matches a substring, for a failure code nested in an error's
+	// text. Keep it specific: a broad match can class an applied write as
+	// refused.
 	Contains string `json:"contains,omitempty"`
+}
+
+func (r Refusal) matches(s string) bool {
+	return (r.Equals != "" && s == r.Equals) || (r.Contains != "" && strings.Contains(s, r.Contains))
 }
 
 // Refused reports whether a response body matches a declared failure shape.
@@ -204,20 +228,41 @@ func (o *Operation) Refused(body []byte) bool {
 	if len(o.Response.RefusedWhen) == 0 {
 		return false
 	}
-	// A body the ordinary decoder rejects isn't a declared failure: it may be
-	// malformed, and the runtime couldn't read an identifier from it either.
-	if err := json.Unmarshal(body, new(any)); err != nil {
-		return false
-	}
+	// JSON entries need a body the ordinary decoder accepts: anything else may
+	// be malformed, and the runtime couldn't read an identifier from it either.
 	// Numbers stay as sent: decoded to float64, a distinct large number could
 	// round into the declared one.
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
 	var doc any
-	if dec.Decode(&doc) != nil {
-		return false
+	jsonOK := json.Unmarshal(body, new(any)) == nil
+	if jsonOK {
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.UseNumber()
+		jsonOK = dec.Decode(&doc) == nil
 	}
+	var page *html.Node
 	for _, r := range o.Response.RefusedWhen {
+		if r.CSS != "" {
+			if page == nil {
+				p, err := html.Parse(bytes.NewReader(body))
+				if err != nil {
+					continue
+				}
+				page = p
+			}
+			sel, err := cascadia.ParseGroup(r.CSS)
+			if err != nil {
+				continue
+			}
+			for _, n := range cascadia.QueryAll(page, sel) {
+				if (r.Equals == "" && r.Contains == "") || r.matches(nodeText(n)) {
+					return true
+				}
+			}
+			continue
+		}
+		if !jsonOK {
+			continue
+		}
 		v, ok := Lookup(doc, r.JSONPointer)
 		if !ok {
 			continue
@@ -555,7 +600,7 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 			}
 		}
 	}
-	if len(op.Response.SuccessStatus) == 0 {
+	if len(op.Response.SuccessStatus) == 0 && op.Response.RedirectSuccess == "" {
 		add("%s: response.success_status is required", where)
 	}
 	for k, ptr := range op.Response.Output {
@@ -563,15 +608,24 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 			add("%s: response.output.%s %q is not a JSON Pointer", where, k, ptr)
 		}
 	}
-	if op.Response.Identifier != "" && !validPointer(op.Response.Identifier) {
-		add("%s: response.identifier is not a JSON Pointer", where)
-	}
+	c.validateExecution(op, where, add)
 	for i, r := range op.Response.RefusedWhen {
-		if r.JSONPointer == "" || !validPointer(r.JSONPointer) {
-			add("%s: response.refused_when[%d].json_pointer must be a non-empty JSON Pointer", where, i)
-		}
-		if (r.Equals == "") == (r.Contains == "") {
-			add("%s: response.refused_when[%d] needs exactly one of equals and contains", where, i)
+		w := fmt.Sprintf("%s: response.refused_when[%d]", where, i)
+		both := r.Equals != "" && r.Contains != ""
+		switch {
+		case (r.CSS == "") == (r.JSONPointer == ""):
+			add("%s needs exactly one of json_pointer and css", w)
+		case r.CSS != "":
+			if _, err := cascadia.ParseGroup(r.CSS); err != nil {
+				add("%s: css %q: %v", w, r.CSS, err)
+			}
+			if both {
+				add("%s takes at most one of equals and contains", w)
+			}
+		case !validPointer(r.JSONPointer):
+			add("%s.json_pointer is not a JSON Pointer", w)
+		case both || (r.Equals == "" && r.Contains == ""):
+			add("%s needs exactly one of equals and contains", w)
 		}
 	}
 	if r := op.Reconcile; r != nil && op.Effect == EffectWrite {
@@ -595,7 +649,7 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 				add("%s: reconcile.operation %q does not exist", where, r.Operation)
 			} else if target.Effect != EffectRead {
 				add("%s: reconcile.operation %q must be a read", where, r.Operation)
-			} else if len(target.Response.Output) == 0 {
+			} else if len(target.Response.Output) == 0 && len(target.Response.Extract) == 0 {
 				// With nothing mapped, any answer, even a sign-in page, reads as
 				// "not found", which permits a second write.
 				add("%s: reconcile.operation %q must map an output", where, r.Operation)
@@ -612,6 +666,62 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 		default:
 			add("%s: reconcile.strategy %q is not marker or none", where, r.Strategy)
 		}
+	}
+}
+
+// validateExecution checks what depends on the operation's execution kind.
+func (c *Compiled) validateExecution(op *Operation, where string, add func(string, ...any)) {
+	resp, req := &op.Response, &op.Request
+	switch op.Kind() {
+	case ExecHTTPJSON:
+		if len(resp.Extract) > 0 || resp.RedirectSuccess != "" || req.FormPage != nil {
+			add("%s: response.extract, response.redirect_success and request.form_page need http.form_html", where)
+		}
+		if resp.Identifier != "" && !validPointer(resp.Identifier) {
+			add("%s: response.identifier is not a JSON Pointer", where)
+		}
+	case ExecHTTPFormHTML:
+		if len(resp.Output) > 0 {
+			add("%s: http.form_html maps output with response.extract, not response.output", where)
+		}
+		if len(req.Body) > 0 {
+			add("%s: http.form_html takes request.form, not request.body", where)
+		}
+		if len(resp.Extract) == 0 && op.Effect == EffectRead {
+			add("%s: a read needs response.extract", where)
+		}
+		if op.Effect == EffectWrite {
+			// A status alone can't show a form write worked: most sign-in and
+			// validation pages answer 200.
+			if _, ok := resp.Extract[resp.Identifier]; resp.Identifier == "" || !ok {
+				add("%s: an http.form_html write needs response.identifier naming a response.extract", where)
+			}
+		} else if resp.RedirectSuccess != "" {
+			add("%s: response.redirect_success applies only to writes", where)
+		}
+		for name, e := range resp.Extract {
+			if !valueNameRE.MatchString(name) {
+				add("%s: response.extract: bad name %q", where, name)
+			}
+			validateExtract(where+".response.extract."+name, e, add)
+		}
+		if resp.RedirectSuccess != "" {
+			if _, err := compileLocationRegex(resp.RedirectSuccess); err != nil {
+				add("%s: response.redirect_success: %v", where, err)
+			}
+		}
+		if fp := req.FormPage; fp != nil {
+			checkPath(where+".request.form_page.path", fp.Path, add)
+			checkTemplate(where+".request.form_page.path", fp.Path, map[string]bool{"input": true}, add)
+			if _, err := cascadia.ParseGroup(fp.Selector); fp.Selector == "" || err != nil {
+				add("%s: request.form_page.selector %q is not a CSS selector", where, fp.Selector)
+			}
+			if req.Method == http.MethodGet || req.Method == http.MethodHead {
+				add("%s: request.form_page needs a method that submits a body", where)
+			}
+		}
+	default:
+		add("%s: execution %q is not http.json or http.form_html", where, op.Execution)
 	}
 }
 
@@ -653,6 +763,12 @@ func opRefs(op *Operation) []ref {
 	}
 	for _, v := range op.Request.Form {
 		out = append(out, templateRefs(v)...)
+	}
+	if fp := op.Request.FormPage; fp != nil {
+		out = append(out, templateRefs(fp.Path)...)
+	}
+	for _, e := range op.Response.Extract {
+		out = append(out, templateRefs(e.Text)...)
 	}
 	if len(op.Request.Body) > 0 {
 		var tree any

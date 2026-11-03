@@ -75,6 +75,8 @@ type Outcome struct {
 	// is never followed for an operation. A browser hides the redirect's
 	// status, so a redirected outcome may carry status 0.
 	Redirected bool `json:"redirected,omitempty"`
+	// Location is a redirect's target, when the capability could read it.
+	Location string `json:"location,omitempty"`
 }
 
 // MaxBody is the largest source response an outcome carries. Outcome.Body

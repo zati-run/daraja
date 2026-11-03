@@ -135,11 +135,11 @@ commands, use `-h` to see their flags.
 
 | Area | State |
 |---|---|
-| Execution | `http.json`, in the runtime or inside the page through the browser capability. |
+| Execution | `http.json` and `http.form_html`, in the runtime or inside the page through the browser capability. `http.form_html` runs only against a synthetic application so far, and its artifacts are written by hand. |
 | Real application | Qualified against a Zendesk test account through its agent UI's internal API: reads, one ticket created, and one internal note added. The runtime ran locally with a static token. |
 | Nanos | Boot, crash recovery of the journal, and brokering to a capability on another host pass on a synthetic application. |
 | OAuth 2.1 with CIMD | Covered by tests with a synthetic client. Not yet qualified with the Zendesk run. |
-| `http.form_html`, `browser.steps` | Designed, not implemented. |
+| `browser.steps` | Designed, not implemented. |
 | Deployed service | None. |
 | CI | `gofmt`, `go vet` and the full race test suite, on every pull request and on `main`. |
 

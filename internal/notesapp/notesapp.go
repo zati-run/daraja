@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +23,8 @@ type App struct {
 	// answering, so tests can lose or interrupt the response.
 	SlowTitle string
 	SlowFor   time.Duration
+	// FormDrift renames the note form's title field, as a redesign would.
+	FormDrift bool
 	// RedirectUnauthenticated makes the API redirect a request without a
 	// session to the sign-in page, as many web apps do, instead of 401.
 	RedirectUnauthenticated bool
@@ -204,6 +207,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, map[string]any{"user": map[string]any{"id": 7}, "csrf": "c-" + s})
+	case r.URL.Path == "/notes" || strings.HasPrefix(r.URL.Path, "/notes/"):
+		a.notesHTML(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/notes"):
 		s, ok := a.sid(r)
 		if !ok && a.RedirectUnauthenticated {
@@ -217,6 +222,80 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.notesAPI(w, r, s)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// notesHTML is the same data as a classic server-rendered application with no
+// JSON: a list, a page per note, and a CSRF-protected form that answers a
+// create with a redirect, and a validation failure with the form again.
+func (a *App) notesHTML(w http.ResponseWriter, r *http.Request) {
+	sid, ok := a.sid(r)
+	if !ok {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	title := "title"
+	if a.FormDrift {
+		title = "headline"
+	}
+	form := func(problem string) string {
+		if problem != "" {
+			problem = `<p class="error">` + html.EscapeString(problem) + `</p>`
+		}
+		return `<!doctype html><html><body><h1>New note</h1>` + problem + `<form id="new-note" method="post" action="/notes">
+<input type="hidden" name="csrf" value="c-` + sid + `">
+<input name="` + title + `"><textarea name="body"></textarea><input type="hidden" name="ref" value="">
+<select name="color"><option value="plain" selected>Plain</option><option value="red">Red</option></select>
+<button type="submit" name="save" value="1">Save</button></form></body></html>`
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/notes")
+	switch {
+	case rest == "/new" && r.Method == http.MethodGet:
+		fmt.Fprint(w, form(""))
+	case rest == "" && r.Method == http.MethodGet:
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		fmt.Fprint(w, `<!doctype html><html><body><ul id="notes">`)
+		for _, n := range a.notes {
+			fmt.Fprintf(w, `<li class="note" data-id="%d"><a href="/notes/%d">%s</a> <small>%s</small></li>`, n.ID, n.ID, html.EscapeString(n.Title), html.EscapeString(n.Ref))
+		}
+		fmt.Fprint(w, `</ul></body></html>`)
+	case rest == "" && r.Method == http.MethodPost:
+		if r.FormValue("csrf") != "c-"+sid {
+			http.Error(w, "csrf", http.StatusForbidden)
+			return
+		}
+		if r.FormValue("title") == "" {
+			fmt.Fprint(w, form("Title is required"))
+			return
+		}
+		a.mu.Lock()
+		n := Note{ID: len(a.notes) + 1, Title: r.FormValue("title"), Body: r.FormValue("body"), Ref: r.FormValue("ref")}
+		a.notes = append(a.notes, n)
+		a.creates++
+		a.mu.Unlock()
+		if a.SlowTitle != "" && n.Title == a.SlowTitle {
+			time.Sleep(a.SlowFor)
+		}
+		http.Redirect(w, r, fmt.Sprintf("/notes/%d", n.ID), http.StatusSeeOther)
+	case r.Method == http.MethodGet:
+		id, err := strconv.Atoi(strings.TrimPrefix(rest, "/"))
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for _, n := range a.notes {
+			if n.ID == id {
+				fmt.Fprintf(w, `<!doctype html><html><body><article data-id="%d"><h1>%s</h1><p>%s</p></article></body></html>`, n.ID, html.EscapeString(n.Title), html.EscapeString(n.Body))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
 }
 
