@@ -27,7 +27,7 @@ const refusedArtifact = `{
      "input_schema": {"type": "object"}, "output_schema": {"type": "object"},
      "request": {"method": "POST", "path": "/gql", "body": {"query": "mutation { a }", "ref": "{{receipt.marker}}"}},
      "response": {"success_status": [200], "output": {"id": "/data/a/id"}, "identifier": "/data/a/id",
-       "refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}, {"json_pointer": "/data/ok", "equals": "false"}, {"json_pointer": "/errors/0/detail", "contains": "NOT_FOUND"}]},
+       "refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}, {"json_pointer": "/data/ok", "equals": "false"}, {"json_pointer": "/errors/0/detail", "contains": "NOT_FOUND"}, {"json_pointer": "/data/code", "equals": "9007199254740992"}, {"json_pointer": "/data/flag", "contains": "false"}]},
      "reconcile": {"strategy": "marker", "operation": "lookup", "found": "/id", "settle_seconds": 3600}}
   ]}`
 
@@ -66,6 +66,10 @@ func TestWriteClassifiesDeclaredFailures(t *testing.T) {
 		{"other error text stays uncertain", `{"errors":[{"detail":"INTERNAL_SERVER_ERROR"}],"data":null}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"failure and identifier contradict", `{"data":{"a":{"__typename":"Failure","id":7}}}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"undeclared failure stays uncertain", `{"data":{"a":{"__typename":"OtherFailure"}}}`, journal.Uncertain, CodeOutcomeUncertain},
+		{"declared number as sent", `{"data":{"code":9007199254740992}}`, journal.Failed, CodeSourceRefused},
+		{"number that would round into the declared one stays uncertain", `{"data":{"code":9007199254740993}}`, journal.Uncertain, CodeOutcomeUncertain},
+		{"contains ignores a non-string", `{"data":{"flag":false}}`, journal.Uncertain, CodeOutcomeUncertain},
+		{"trailing text stays uncertain", `{"data":{"ok":false}} trailing`, journal.Uncertain, CodeOutcomeUncertain},
 		{"not JSON stays uncertain", `<html>sign in</html>`, journal.Uncertain, CodeOutcomeUncertain},
 		{"success", `{"data":{"a":{"__typename":"Ok","id":7}}}`, journal.Succeeded, ""},
 	}

@@ -190,7 +190,8 @@ type ResponseSpec struct {
 type Refusal struct {
 	JSONPointer string `json:"json_pointer"`
 	// Equals is compared with the scalar at JSONPointer as a string, so
-	// "false" matches JSON false and "7" matches JSON 7.
+	// "false" matches JSON false and "7" matches JSON 7. A number must match as
+	// sent: "7" doesn't match 7.0.
 	Equals string `json:"equals,omitempty"`
 	// Contains matches a substring of the string at JSONPointer, for a failure
 	// code nested in an error's text. Keep it specific: a broad match can class
@@ -203,8 +204,12 @@ func (o *Operation) Refused(body []byte) bool {
 	if len(o.Response.RefusedWhen) == 0 {
 		return false
 	}
+	// Numbers stay as sent: decoded to float64, a distinct large number could
+	// round into the declared one.
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var doc any
-	if json.Unmarshal(body, &doc) != nil {
+	if dec.Decode(&doc) != nil || dec.More() {
 		return false
 	}
 	for _, r := range o.Response.RefusedWhen {
@@ -212,11 +217,13 @@ func (o *Operation) Refused(body []byte) bool {
 		if !ok {
 			continue
 		}
-		s, err := scalarString(v)
-		if err != nil {
+		if r.Contains != "" {
+			if str, ok := v.(string); ok && strings.Contains(str, r.Contains) {
+				return true
+			}
 			continue
 		}
-		if (r.Equals != "" && s == r.Equals) || (r.Contains != "" && strings.Contains(s, r.Contains)) {
+		if s, err := scalarString(v); err == nil && s == r.Equals {
 			return true
 		}
 	}
