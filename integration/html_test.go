@@ -157,6 +157,8 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"option text keeps a no-break space", wrap("<select name=\"s\"><option>  A&nbsp;B\n C </option></select>", ""), "s=A%C2%A0B+C&title=new"},
 		{"radio in a datalist still unchecks its group", wrap(`<input type="radio" name="d" value="1" checked><datalist><input type="radio" name="d" value="0" checked></datalist>`, ""), "title=new"},
 		{"control in SVG isn't a control", wrap(`<svg><input type="hidden" name="delete" value="1"/></svg>`, ""), "title=new"},
+		{"option in a template isn't an option", wrap(`<select name="s"><option value="a">A</option><template><option selected value="b">B</option></template></select>`, ""), "s=a&title=new"},
+		{"control in a template isn't a control", wrap(`<template><input type="hidden" name="delete" value="1"></template>`, ""), "title=new"},
 		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
 	}
 	for _, tc := range cases {
@@ -327,6 +329,20 @@ func TestEmptyFormReferenceOwnsNothing(t *testing.T) {
 	got, err := o.FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "t"}})
 	if err != nil || got.Has("delete") {
 		t.Errorf("fields = %v, err = %v", got, err)
+	}
+}
+
+func TestTemplateContentsMatchNothing(t *testing.T) {
+	page := []byte(`<p>Please sign in.</p><template><div class="saved" data-id="7"></div></template>`)
+	o := &Operation{Response: ResponseSpec{
+		Extract:     map[string]Extract{"id": {CSS: ".saved", Attr: "data-id"}},
+		RefusedWhen: []Refusal{{CSS: ".saved"}},
+	}}
+	if v, ok := o.ExtractValues("http://a.test", Answer{Status: 200, Body: page}, Vars{})["id"]; ok {
+		t.Errorf("extracted %q from a template", v)
+	}
+	if o.Refused(page) {
+		t.Error("refused because of a template's contents")
 	}
 }
 
