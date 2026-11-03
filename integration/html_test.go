@@ -15,7 +15,7 @@ const formPage = `<!doctype html><html><body>
 <input type="hidden" name="csrf" value="tok">
 <input name="title" value="old"><textarea name="body"> kept </textarea>
 <input type="checkbox" name="on" value="yes" checked><input type="checkbox" name="off" value="no">
-<input name="gone" value="x" disabled><input type="file" name="upload">
+<input name="gone" value="x" disabled>
 <select name="color"><option value="a">A</option><option value="b" selected>B</option></select>
 <select name="size"><option>Small</option><option>Big</option></select>
 <button type="submit" name="save" value="1">Save</button>
@@ -155,6 +155,7 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"checked radio keeps its place before a later control", wrap(`<input type="radio" name="mode" value="save" checked><input type="hidden" name="mode" value="delete">`, ""), "mode=save&mode=delete&title=new"},
 		{"hidden newlines become CRLF", wrap("<input type=\"hidden\" name=\"h\" value=\"a&#10;b\">", ""), "h=a%0D%0Ab&title=new"},
 		{"option text keeps a no-break space", wrap("<select name=\"s\"><option>  A&nbsp;B\n C </option></select>", ""), "s=A%C2%A0B+C&title=new"},
+		{"radio in a datalist still unchecks its group", wrap(`<input type="radio" name="d" value="1" checked><datalist><input type="radio" name="d" value="0" checked></datalist>`, ""), "title=new"},
 		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
 	}
 	for _, tc := range cases {
@@ -266,6 +267,7 @@ func TestDefaultsABrowserMayChangeAreDrift(t *testing.T) {
 		`<input type="unknown" name="n" value="x">`,
 		"<input name=\"n\" value=\"alice&#10;bob\">",
 		`<input type="hidden" name="_charset_">`,
+		`<input type="file" name="n">`,
 		`<input name="n" value="x" dirname="d">`,
 		`<textarea name="n" wrap="hard" cols="3">abcdef</textarea>`,
 		`<select name="n" size="01"><option value="a">A</option></select>`,
@@ -308,10 +310,18 @@ func TestFormNotEncodedAsUTF8IsDrift(t *testing.T) {
 }
 
 func TestUTF8ContentType(t *testing.T) {
-	for ct, want := range map[string]bool{"": true, "text/html": true, "text/html; charset=UTF-8": true, `text/html; charset="utf-8"; x=y`: true, "text/html; charset=iso-8859-1": false, "text/html; Charset=Shift_JIS": false} {
+	for ct, want := range map[string]bool{"": true, "text/html": true, "text/html; charset=UTF-8": true, `text/html; charset="utf-8"; x=y`: true, "text/html; charset=iso-8859-1": false, "text/html; Charset=Shift_JIS": false, "text/html; xcharset=utf-8; charset=windows-1252": false, "text/html; charset": false} {
 		if got := UTF8ContentType(ct); got != want {
 			t.Errorf("UTF8ContentType(%q) = %v, want %v", ct, got, want)
 		}
+	}
+}
+
+func TestDuplicateFormIDIsDrift(t *testing.T) {
+	page := []byte(`<div id="f"></div><form id="f" method="post" action="/notes"><input name="title"><input form="f" type="hidden" name="delete" value="1"></form>`)
+	o := formOp(func(o *Operation) { o.Request.FormPage.Selector = "form#f" })
+	if _, err := o.FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "t"}}); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("err = %v, want ErrSourceChanged", err)
 	}
 }
 

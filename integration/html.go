@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -324,6 +325,10 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 		return nil, fmt.Errorf("%w: %q matches %d elements, want one form", ErrSourceChanged, fp.Selector, len(forms))
 	}
 	form := forms[0]
+	if id, ok := attr(form, "id"); ok && countID(doc, id) != 1 {
+		// Controls join a form by the first element with its ID.
+		return nil, fmt.Errorf("%w: the form's ID isn't unique", ErrSourceChanged)
+	}
 	// Errors here reach receipts, so they name no value from the page.
 	method, _ := attr(form, "method")
 	if method == "" {
@@ -378,6 +383,18 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 		}
 	}
 	return values, nil
+}
+
+// countID counts the elements with an ID.
+func countID(n *html.Node, id string) int {
+	count := 0
+	if v, ok := attr(n, "id"); ok && n.Type == html.ElementNode && v == id {
+		count = 1
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		count += countID(c, id)
+	}
+	return count
 }
 
 // sameTarget compares two paths with their queries, in any query order.
@@ -473,9 +490,10 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 	var find func(*html.Node)
 	find = func(n *html.Node) {
 		if n.Type == html.ElementNode {
-			if n.DataAtom == atom.Datalist || n.DataAtom == atom.Template {
+			if n.DataAtom == atom.Template {
 				return
 			}
+			// A radio in a datalist still unchecks its group, though it's never sent.
 			if group, ok := checkedRadio(n); ok && ownedBy(n, form) {
 				radios[group] = n
 			}
@@ -506,7 +524,9 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 				}
 				names[name] = atom.Input
 				switch t {
-				case "submit", "button", "reset", "image", "file":
+				case "file":
+					computed[name] = true // a browser sends it empty, by a rule not followed here
+				case "submit", "button", "reset", "image":
 				case "radio":
 					if radios[name] == n {
 						val, ok := attr(n, "value")
@@ -586,14 +606,18 @@ func unreproducible(n *html.Node, name string) bool {
 
 // UTF8ContentType reports whether a Content-Type header leaves a form page
 // encoded as UTF-8: a browser encodes the form in the page's encoding, and
-// nothing here encodes any other.
+// nothing here encodes any other. A header that doesn't parse says nothing, so it
+// fails closed.
 func UTF8ContentType(ct string) bool {
-	_, after, ok := strings.Cut(strings.ToLower(ct), "charset=")
-	if !ok {
+	if ct == "" {
 		return true
 	}
-	cs := strings.Trim(strings.TrimSpace(strings.SplitN(after, ";", 2)[0]), `"`)
-	return cs == "utf-8" || cs == "utf8"
+	_, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	cs, ok := params["charset"]
+	return !ok || strings.EqualFold(cs, "utf-8") || strings.EqualFold(cs, "utf8")
 }
 
 // utf8Page reports whether a browser would encode this form as UTF-8. A page
