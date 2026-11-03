@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -53,6 +54,7 @@ const (
 	CodeCapabilityUnavailable = capability.CodeUnavailable
 	CodeCapabilityBusy        = capability.CodeBusy
 	CodeSessionNeedsHuman     = capability.CodeNeedsHuman
+	CodeSourceChanged         = capability.CodeSourceChanged
 )
 
 // Dispatcher hands a job to an execution capability. capability.Broker
@@ -371,7 +373,7 @@ func (r *Runtime) read(ctx context.Context, p *Principal, in *integration.Compil
 			r.dropSession(in, g.Credential)
 			return nil, errf(CodeSessionUnavailable, "the source redirected the request again after the session was refreshed")
 		}
-		out, e := r.mapResponse(op, x.status, x.body)
+		out, e := mapResponse(in, op, x.answer(), integration.Vars{Input: input})
 		r.log.Info("read", "principal", p.ID, "integration", in.ID, "operation", op.Name, "status", x.status, "ok", e == nil)
 		if e != nil {
 			return nil, e
@@ -405,7 +407,7 @@ func (r *Runtime) write(ctx context.Context, p *Principal, in *integration.Compi
 	marker := Marker(key)
 	vars := integration.Vars{Input: input, Receipt: map[string]string{"marker": marker}}
 	// Render before recording, so a render failure records nothing.
-	if _, err := integration.BuildRequest(in.Source.Origin, op.Request, vars); err != nil {
+	if _, err := op.Build(in.Source.Origin, vars, nil); err != nil {
 		return nil, errf(CodeInvalidInput, "%v", err)
 	}
 	rec, err := r.journal.Begin(journal.Receipt{Key: key, Principal: p.ID, Integration: in.ID, Operation: op.Name, Marker: marker, InputSHA256: inputHash})
@@ -429,18 +431,22 @@ func (r *Runtime) write(ctx context.Context, p *Principal, in *integration.Compi
 		rec.State, rec.Code, rec.Detail = journal.Uncertain, CodeOutcomeUncertain, "the request was sent but no response was received: "+x.detail
 	default:
 		rec.HTTPStatus = x.status
+		a := x.answer()
 		switch {
-		case slices.Contains(op.Response.SuccessStatus, x.status) && op.Refused(x.body) && identifier(op, x.body) == "":
+		case x.redirect && op.RedirectSucceeded(in.Source.Origin, a) && identifier(in, op, a, vars) != "":
+			rec.State = journal.Succeeded
+			rec.Identifier = identifier(in, op, a, vars)
+		case slices.Contains(op.Response.SuccessStatus, x.status) && op.Refused(x.body) && identifier(in, op, a, vars) == "":
 			rec.State, rec.Code, rec.Detail = journal.Failed, CodeSourceRefused, "the source answered with a declared failure"
 		case slices.Contains(op.Response.SuccessStatus, x.status) && op.Refused(x.body):
 			rec.State, rec.Code, rec.Detail = journal.Uncertain, CodeOutcomeUncertain, "the source answered with both a declared failure and an identifier; the effect may have been applied"
-		case slices.Contains(op.Response.SuccessStatus, x.status) && !wellFormed(op, x.body):
+		case slices.Contains(op.Response.SuccessStatus, x.status) && !wellFormed(in, op, a, vars):
 			// A success status without the declared shape is most often a
 			// sign-in or error page. The effect is unknown; reconcile it.
 			rec.State, rec.Code, rec.Detail = journal.Uncertain, CodeOutcomeUncertain, "the source answered "+strconv.Itoa(x.status)+" without the declared response shape; the effect may have been applied"
 		case slices.Contains(op.Response.SuccessStatus, x.status):
 			rec.State = journal.Succeeded
-			rec.Identifier = identifier(op, x.body)
+			rec.Identifier = identifier(in, op, a, vars)
 		case x.redirect:
 			r.dropSession(in, g.Credential)
 			rec.State, rec.Code, rec.Detail = journal.Uncertain, CodeOutcomeUncertain, "the source redirected the write, most often to sign in; the effect may have been applied"
@@ -464,7 +470,7 @@ func (r *Runtime) write(ctx context.Context, p *Principal, in *integration.Compi
 	if rec.State != journal.Succeeded {
 		return nil, &Error{Code: rec.Code, Message: rec.Detail, Receipt: &rec}
 	}
-	out, e := r.mapResponse(op, x.status, x.body)
+	out, e := mapResponse(in, op, x.answer(), vars)
 	if e != nil {
 		e.Receipt = &rec
 		e.Message = "the write succeeded but its output is invalid: " + e.Message
@@ -499,7 +505,9 @@ func (r *Runtime) replay(op *integration.CompiledOp, rec journal.Receipt) (*Resu
 	switch rec.State {
 	case journal.Succeeded:
 		out := map[string]any{}
-		if rec.Identifier != "" {
+		if rec.Identifier != "" && op.Kind() != integration.ExecHTTPJSON {
+			out = op.TypedOutput(map[string]string{op.Response.Identifier: rec.Identifier})
+		} else if rec.Identifier != "" {
 			// Only the identifier is retained; source data is not stored.
 			for k, ptr := range op.Response.Output {
 				if ptr == op.Response.Identifier {
@@ -664,8 +672,14 @@ type exchangeResult struct {
 	body     []byte
 	code     string
 	detail   string
-	// redirect reports a redirect the request did not follow.
+	// redirect reports a redirect the request did not follow, and location
+	// its target when known.
 	redirect bool
+	location string
+}
+
+func (x exchangeResult) answer() integration.Answer {
+	return integration.Answer{Status: x.status, Body: x.body, Location: x.location}
 }
 
 // exchange performs one request for an operation. Provider-browser
@@ -682,7 +696,7 @@ func (r *Runtime) exchange(ctx context.Context, in *integration.Compiled, op *in
 			OpRef:   capability.OpRef{IntegrationID: in.ID, Version: in.Version, ArtifactSHA256: in.Hash, Operation: op.Name},
 			Binding: g.Credential, Input: vars.Input, Marker: marker,
 		})
-		return exchangeResult{dispatch: out.Dispatch, status: out.Status, body: out.Body, code: out.Code, detail: out.Detail, redirect: out.Redirected}
+		return exchangeResult{dispatch: out.Dispatch, status: out.Status, body: out.Body, code: out.Code, detail: out.Detail, redirect: out.Redirected, location: out.Location}
 	}
 	s, e := r.session(ctx, in, g.Credential, refresh)
 	if e != nil {
@@ -699,14 +713,18 @@ func (r *Runtime) exchange(ctx context.Context, in *integration.Compiled, op *in
 		}
 		return exchangeResult{dispatch: capability.Unknown, detail: errClass(err)}
 	}
-	return exchangeResult{dispatch: capability.Sent, status: resp.StatusCode, body: body, redirect: resp.StatusCode >= 300 && resp.StatusCode < 400}
+	return exchangeResult{dispatch: capability.Sent, status: resp.StatusCode, body: body, redirect: resp.StatusCode >= 300 && resp.StatusCode < 400, location: resp.Header.Get("Location")}
 }
 
 // send renders and sends a request. wrote reports whether the request was
 // fully written to the connection, which decides "not sent" versus
 // "uncertain" when an error occurs.
 func (r *Runtime) send(ctx context.Context, in *integration.Compiled, op *integration.CompiledOp, s *session.Session, vars integration.Vars) (*http.Response, []byte, bool, error) {
-	req, err := integration.BuildRequest(in.Source.Origin, op.Request, vars)
+	fields, e := r.formFields(ctx, in, op, s, vars)
+	if e != nil {
+		return nil, nil, false, e
+	}
+	req, err := op.Build(in.Source.Origin, vars, fields)
 	if err != nil {
 		return nil, nil, false, errf(CodeInvalidInput, "%v", err)
 	}
@@ -746,6 +764,70 @@ func (r *Runtime) send(ctx context.Context, in *integration.Compiled, op *integr
 	return resp, body, true, nil
 }
 
+// formFields fetches the operation's form page, if it has one, and reads the
+// values to submit. Every failure here is before the submission, so nothing
+// with an effect was sent.
+func (r *Runtime) formFields(ctx context.Context, in *integration.Compiled, op *integration.CompiledOp, s *session.Session, vars integration.Vars) (url.Values, *Error) {
+	if op.Request.FormPage == nil {
+		return nil, nil
+	}
+	path, err := op.FormPagePath(vars)
+	if err != nil {
+		return nil, errf(CodeInvalidInput, "form page: %v", err)
+	}
+	target, err := vars.RenderString(op.Request.Path, url.PathEscape)
+	if err != nil {
+		return nil, errf(CodeInvalidInput, "form action: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, in.Source.Origin+path, nil)
+	if err != nil {
+		return nil, errf(CodeInvalidInput, "form page: %v", err)
+	}
+	req.Header.Set("Accept", integration.AcceptHTML)
+	if err := s.Apply(req, in.Session.RequestHeaders); err != nil {
+		return nil, errf(CodeSessionUnavailable, "%v", err)
+	}
+	client := *r.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errf(CodeNotSent, "form page: %s", errClass(err))
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, errf(CodeNotSent, "form page: %s", errClass(err))
+	}
+	switch {
+	case resp.StatusCode >= 300 && resp.StatusCode < 400, resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		r.dropSessionFor(in, s)
+		return nil, errf(CodeSessionUnavailable, "the form page needs a new session")
+	case resp.StatusCode != http.StatusOK:
+		return nil, errf(CodeSourceChanged, "the form page answered %d", resp.StatusCode)
+	}
+	fields, err := op.FormFields(in.Source.Origin, body, target, vars)
+	if errors.Is(err, integration.ErrSourceChanged) {
+		return nil, errf(CodeSourceChanged, "%v", err)
+	}
+	if err != nil {
+		return nil, errf(CodeInvalidInput, "%v", err)
+	}
+	return fields, nil
+}
+
+// dropSessionFor forgets a session by its value.
+func (r *Runtime) dropSessionFor(in *integration.Compiled, s *session.Session) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, v := range r.sessions {
+		if v == s && strings.HasPrefix(k, in.ID+"\x00") {
+			delete(r.sessions, k)
+		}
+	}
+}
+
 // definitelyNotSent recognises errors that happen before any request byte
 // can reach the source.
 func definitelyNotSent(err error) bool {
@@ -777,20 +859,25 @@ func errClass(err error) string {
 	return "connection error"
 }
 
-func (r *Runtime) mapResponse(op *integration.CompiledOp, status int, body []byte) (map[string]any, *Error) {
-	if !slices.Contains(op.Response.SuccessStatus, status) {
-		return nil, errf(CodeSourceRefused, "the source answered with status %d", status)
+func mapResponse(in *integration.Compiled, op *integration.CompiledOp, a integration.Answer, v integration.Vars) (map[string]any, *Error) {
+	if !slices.Contains(op.Response.SuccessStatus, a.Status) && !op.RedirectSucceeded(in.Source.Origin, a) {
+		return nil, errf(CodeSourceRefused, "the source answered with status %d", a.Status)
 	}
-	if op.Refused(body) {
+	if op.Refused(a.Body) {
 		return nil, errf(CodeSourceRefused, "the source answered with a declared failure")
 	}
-	var doc any
-	if len(op.Response.Output) > 0 || len(op.Response.RefusedWhen) > 0 {
-		if err := json.Unmarshal(body, &doc); err != nil {
-			return nil, errf(CodeInvalidOutput, "the response is not JSON")
+	var out map[string]any
+	if op.Kind() == integration.ExecHTTPJSON {
+		var doc any
+		if len(op.Response.Output) > 0 || len(op.Response.RefusedWhen) > 0 {
+			if err := json.Unmarshal(a.Body, &doc); err != nil {
+				return nil, errf(CodeInvalidOutput, "the response is not JSON")
+			}
 		}
+		out = integration.MapOutput(doc, op.Response.Output)
+	} else {
+		out = op.TypedOutput(op.ExtractValues(in.Source.Origin, a, v))
 	}
-	out := integration.MapOutput(doc, op.Response.Output)
 	if err := op.Output.Validate(out); err != nil {
 		return nil, errf(CodeInvalidOutput, "output does not match the output schema: %v", err)
 	}
@@ -800,24 +887,30 @@ func (r *Runtime) mapResponse(op *integration.CompiledOp, status int, body []byt
 // wellFormed reports whether a success response has the shape the
 // operation declares: an identifier when one is declared, otherwise JSON
 // when output is mapped from JSON.
-func wellFormed(op *integration.CompiledOp, body []byte) bool {
+func wellFormed(in *integration.Compiled, op *integration.CompiledOp, a integration.Answer, v integration.Vars) bool {
 	if op.Response.Identifier != "" {
-		return identifier(op, body) != ""
+		return identifier(in, op, a, v) != ""
+	}
+	if op.Kind() != integration.ExecHTTPJSON {
+		return true
 	}
 	if len(op.Response.Output) > 0 || len(op.Response.RefusedWhen) > 0 {
 		// The same check Refused makes: an answer it can't read says nothing
 		// either way, and JSON syntax alone would let it count as success.
-		return json.Unmarshal(body, new(any)) == nil
+		return json.Unmarshal(a.Body, new(any)) == nil
 	}
 	return true
 }
 
-func identifier(op *integration.CompiledOp, body []byte) string {
+func identifier(in *integration.Compiled, op *integration.CompiledOp, a integration.Answer, vars integration.Vars) string {
 	if op.Response.Identifier == "" {
 		return ""
 	}
+	if op.Kind() != integration.ExecHTTPJSON {
+		return op.ExtractValues(in.Source.Origin, a, vars)[op.Response.Identifier]
+	}
 	var doc any
-	if json.Unmarshal(body, &doc) != nil {
+	if json.Unmarshal(a.Body, &doc) != nil {
 		return ""
 	}
 	v, ok := integration.Lookup(doc, op.Response.Identifier)

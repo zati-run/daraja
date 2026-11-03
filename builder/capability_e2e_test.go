@@ -33,9 +33,9 @@ type capEnv struct {
 	stop   func() // stops the capability agent
 }
 
-func browserArtifact(t *testing.T, origin string, edits ...string) *integration.Compiled {
+func browserArtifact(t *testing.T, fixture, origin string, edits ...string) *integration.Compiled {
 	t.Helper()
-	b, err := os.ReadFile("../integration/testdata/notes-browser.json")
+	b, err := os.ReadFile("../integration/testdata/" + fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +59,11 @@ func browserArtifact(t *testing.T, origin string, edits ...string) *integration.
 // recipe; binding "nobody" has no credentials.
 func startCapEnv(t *testing.T, capTimeout time.Duration, edits ...string) *capEnv {
 	t.Helper()
+	return startCapEnvFor(t, "notes-browser.json", capTimeout, edits...)
+}
+
+func startCapEnvFor(t *testing.T, fixture string, capTimeout time.Duration, edits ...string) *capEnv {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("starts Chrome")
 	}
@@ -66,7 +71,7 @@ func startCapEnv(t *testing.T, capTimeout time.Duration, edits ...string) *capEn
 	app.RedirectUnauthenticated = len(edits) > 0
 	appSrv := httptest.NewServer(app)
 	t.Cleanup(appSrv.Close)
-	in := browserArtifact(t, appSrv.URL, edits...)
+	in := browserArtifact(t, fixture, appSrv.URL, edits...)
 
 	broker, err := capability.NewBroker(capability.BrokerConfig{
 		Registrations: []capability.Registration{{ID: "host", TokenSHA256: capability.HashToken(capToken), Bindings: []string{"alice", "nobody"}}},
@@ -301,5 +306,60 @@ func TestCapabilityRedirectedWriteIsUncertain(t *testing.T) {
 	out, res := call(t, c, tool("create_note"), map[string]any{"title": "After redirect", "idempotency_key": "cap-redirect-2"})
 	if res.IsError || out["id"] == nil || e.app.Creates() != 1 {
 		t.Fatalf("write after redirect: %s creates=%d", res.Text(), e.app.Creates())
+	}
+}
+
+// http.form_html in the page: the session stays in the browser, the CSRF token
+// comes from the form itself, and the redirect's target, which a page can't
+// read, comes from the browser's own network events.
+func TestCapabilityFormWrite(t *testing.T) {
+	e := startCapEnvFor(t, "notes-form.json", 60*time.Second)
+	c := mcpClient(t, e.rtURL, agentToken)
+	tool := func(op string) string { return mcpserver.ToolName("synthetic-notes-form", op) }
+
+	out, res := call(t, c, tool("get_note"), map[string]any{"id": 1})
+	if res.IsError || out["title"] != "Seed note" || out["id"] != 1.0 {
+		t.Fatalf("read: %s", res.Text())
+	}
+
+	args := map[string]any{"title": "Form note", "idempotency_key": "form-1"}
+	out, res = call(t, c, tool("create_note"), args)
+	if res.IsError || out["id"] != 2.0 {
+		t.Fatalf("write: %s", res.Text())
+	}
+	out, res = call(t, c, tool("create_note"), args)
+	if res.IsError || out["id"] != 2.0 || e.app.Creates() != 1 {
+		t.Fatalf("replay: %s creates=%d", res.Text(), e.app.Creates())
+	}
+
+	// A declared failure: the form comes back with its error.
+	_, res = call(t, c, tool("create_note"), map[string]any{"title": "", "idempotency_key": "form-2"})
+	if !res.IsError || !strings.Contains(res.Text(), "source_refused") || !strings.Contains(res.Text(), `"failed"`) {
+		t.Fatalf("declared failure: %s", res.Text())
+	}
+
+	// Drift: nothing is sent, and the caller is told why.
+	e.app.FormDrift = true
+	_, res = call(t, c, tool("create_note"), map[string]any{"title": "Drift", "idempotency_key": "form-3"})
+	if !res.IsError || !strings.Contains(res.Text(), capability.CodeSourceChanged) || !strings.Contains(res.Text(), `"failed"`) {
+		t.Fatalf("drift: %s", res.Text())
+	}
+	e.app.FormDrift = false
+	if e.app.Creates() != 1 {
+		t.Fatalf("creates = %d, want 1", e.app.Creates())
+	}
+
+	// A reconcile read finds the write's marker in the HTML list.
+	out, res = call(t, c, "daraja__receipt", map[string]any{"tool": tool("create_note"), "idempotency_key": "form-1"})
+	if res.IsError || out["state"] != journal.Succeeded {
+		t.Fatalf("receipt: %s", res.Text())
+	}
+	found, res := call(t, c, tool("find_note_by_ref"), map[string]any{"ref": out["marker"]})
+	if res.IsError || found["id"] != 2.0 {
+		t.Fatalf("find by marker: %s", res.Text())
+	}
+	missing, res := call(t, c, tool("find_note_by_ref"), map[string]any{"ref": "dj-not-there"})
+	if res.IsError || missing["id"] != nil {
+		t.Fatalf("find missing: %s", res.Text())
 	}
 }

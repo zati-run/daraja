@@ -1,6 +1,6 @@
 # RFC 001: Daraja architecture
 
-- **Status:** Draft, revision 7. Not accepted.
+- **Status:** Draft, revision 8. Not accepted.
 - **Date:** 2026-10-31
 - **Owner:** David Ndungu
 - **Repository:** `github.com/zati-run/daraja`
@@ -42,6 +42,40 @@ The owner answered the questions that blocked acceptance on 2026-10-31:
 As a consequence, this revision moves `http.form_html` and `browser.steps`
 from phase 1a to phase 2 (a **[Proposal]**). They stay in the artifact format
 and on the ladder, but v1 doesn't implement them. See [Phased scope](#phased-scope).
+
+### Revision 8 changes (`http.form_html`)
+
+`http.form_html` is implemented. These are **[Proposal]** changes the owner
+hasn't separately decided, and the details below replace the sketch in
+[Integration artifact](#integration-artifact) where they differ:
+
+- **Reads** fetch a page and take outputs from `response.extract`: a CSS
+  selector with an optional attribute and text anchor, an anchored
+  `location_regex`, or a JSON Pointer. A text anchor can use `{{input.x}}`, so
+  a reconcile read can find a marker in an HTML list.
+- **Writes** fetch `request.form_page` first. The submitted values are the
+  form's own, including its CSRF token, with `request.form` set over them.
+- **Drift is checked before sending.** The selector must match exactly one
+  form, and its method, action and encoding must match the artifact, and every
+  declared field must exist. Otherwise the write is `failed/not_sent` with
+  `source_changed`. Only `application/x-www-form-urlencoded` is supported.
+- **A form write must declare `response.identifier`,** naming an extract. A
+  status alone can't show that a form write worked, because most sign-in and
+  validation pages answer 200.
+- **Post-redirect-get.** `response.redirect_success` is an anchored pattern for
+  a local path and query. A redirect matching it is success. Any other redirect
+  stays `uncertain`, so a redirect to sign in is never success. In the page,
+  `fetch` can't read a redirect's target, so the capability reads it from the
+  browser's network events. If it can't tell the answer apart, the write stays
+  `uncertain`.
+- `response.refused_when` also takes `css`, for a validation error on a page.
+  It applies only to a status in `success_status`, so a form that answers 200
+  with its errors must list 200.
+- **`placement` isn't a field.** The session provider decides where an
+  operation runs.
+
+Not done: the deterministic planner doesn't propose this kind, so these
+artifacts are written by hand. No real application has been qualified with it.
 
 ### Revision 7 changes (A14 follow-ups)
 
@@ -510,7 +544,7 @@ capabilities. The runtime↔capability protocol is named and authenticated.
 | Capability | Where it runs | Status |
 |---|---|---|
 | `http.json` | In-page through the browser capability (the default under D-14), or in the runtime when the session may be used there | Both placements are v1 scope. |
-| `http.form_html` | As above | Phase 2 |
+| `http.form_html` | As above | Implemented; qualified only on a synthetic application. |
 | `browser.steps` | Host browser capability with a headed, persistent profile | Phase 2 |
 | `desktop.native` | A long-lived native environment that owns permissions and a user session | Not implemented, not claimed |
 

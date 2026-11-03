@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"sync"
 	"time"
@@ -33,6 +34,8 @@ type FetchRequest struct {
 	URL     string
 	Headers map[string]string
 	Body    []byte
+	// WantLocation asks for a redirect's target, which a page can't read.
+	WantLocation bool
 }
 
 // FetchResult is the source's answer as the page saw it.
@@ -43,6 +46,9 @@ type FetchResult struct {
 	// Redirected reports a redirect the page did not follow. Status is 0
 	// when the browser hides it.
 	Redirected bool
+	// Location is the redirect's target, when WantLocation was set and it
+	// could be read.
+	Location string
 }
 
 // Page is one dedicated browser profile serving one credential binding.
@@ -207,11 +213,15 @@ func (h *Host) Execute(ctx context.Context, job Job) Outcome {
 	if op.Effect == integration.EffectWrite {
 		vars.Receipt = map[string]string{"marker": job.Marker}
 	}
-	req, err := integration.BuildRequest(in.Source.Origin, op.Request, vars)
+	fields, out, ok := h.formFields(ctx, b, in, op, vars)
+	if !ok {
+		return out
+	}
+	req, err := op.Build(in.Source.Origin, vars, fields)
 	if err != nil {
 		return notSent(CodeInvalidInput, "%v", err)
 	}
-	fr := FetchRequest{Method: req.Method, URL: req.URL.String(), Headers: map[string]string{}}
+	fr := FetchRequest{Method: req.Method, URL: req.URL.String(), Headers: map[string]string{}, WantLocation: op.Response.RedirectSuccess != ""}
 	for k := range req.Header {
 		fr.Headers[k] = req.Header.Get(k)
 	}
@@ -239,13 +249,53 @@ func (h *Host) Execute(ctx context.Context, job Job) Outcome {
 		h.log.Warn("in-page request outcome unknown", "integration", in.ID, "operation", op.Name, "error", err)
 		return Outcome{Dispatch: Unknown, Code: CodeLost, Detail: "the in-page request did not complete: " + err.Error()}
 	}
-	if res.Redirected || res.Status == http.StatusUnauthorized || res.Status == http.StatusForbidden {
+	declared := res.Redirected && op.RedirectSucceeded(in.Source.Origin, integration.Answer{Location: res.Location})
+	if (res.Redirected && !declared) || res.Status == http.StatusUnauthorized || res.Status == http.StatusForbidden {
 		// A redirect is most often an expired session sending the request
 		// to a sign-in page.
 		b.dropSession(in.ID)
 	}
 	h.log.Info("executed", "binding", job.Binding, "integration", in.ID, "operation", op.Name, "status", res.Status, "redirected", res.Redirected)
-	return Outcome{Dispatch: Sent, Status: res.Status, Body: res.Body, Redirected: res.Redirected}
+	return Outcome{Dispatch: Sent, Status: res.Status, Body: res.Body, Redirected: res.Redirected, Location: res.Location}
+}
+
+// formFields fetches the operation's form page, if it has one, and reads the
+// values to submit. Every failure here is before the submission, so nothing
+// with an effect was sent.
+func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.Compiled, op *integration.CompiledOp, vars integration.Vars) (url.Values, Outcome, bool) {
+	if op.Request.FormPage == nil {
+		return nil, Outcome{}, true
+	}
+	path, err := op.FormPagePath(vars)
+	if err != nil {
+		return nil, notSent(CodeInvalidInput, "form page: %v", err), false
+	}
+	res, err := b.Page.Fetch(ctx, in, FetchRequest{Method: http.MethodGet, URL: in.Source.Origin + path, Headers: map[string]string{"Accept": integration.AcceptHTML}})
+	if errors.Is(err, ErrHumanActive) {
+		return nil, notSent(CodeNeedsHuman, "%v", err), false
+	}
+	if err != nil {
+		return nil, notSent(CodeSession, "form page: %v", err), false
+	}
+	if res.Redirected || res.Status == http.StatusUnauthorized || res.Status == http.StatusForbidden {
+		b.dropSession(in.ID)
+		return nil, notSent(CodeSession, "the form page needs a new session"), false
+	}
+	if res.Status != http.StatusOK {
+		return nil, notSent(CodeSourceChanged, "the form page answered %d", res.Status), false
+	}
+	target, err := vars.RenderString(op.Request.Path, url.PathEscape)
+	if err != nil {
+		return nil, notSent(CodeInvalidInput, "form action: %v", err), false
+	}
+	fields, err := op.FormFields(in.Source.Origin, res.Body, target, vars)
+	if errors.Is(err, integration.ErrSourceChanged) {
+		return nil, notSent(CodeSourceChanged, "%v", err), false
+	}
+	if err != nil {
+		return nil, notSent(CodeInvalidInput, "%v", err), false
+	}
+	return fields, Outcome{}, true
 }
 
 func (b *hostBinding) acquire(ctx context.Context, maxQueue int) (func(), bool) {

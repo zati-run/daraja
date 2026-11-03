@@ -1,0 +1,216 @@
+{
+  "format": "daraja.integration/v1alpha1",
+  "id": "synthetic-notes-form",
+  "version": "1",
+  "description": "Synthetic notes application with no JSON API, reached through its server-rendered pages and forms.",
+  "source": {
+    "kind": "web",
+    "origin": "http://127.0.0.1:1"
+  },
+  "session": {
+    "provider": "browser",
+    "browser_sign_in": [
+      {
+        "navigate": "/login"
+      },
+      {
+        "fill": "input[name=user]",
+        "value": "{{credential.username}}"
+      },
+      {
+        "fill": "input[name=pass]",
+        "value": "{{credential.password}}"
+      },
+      {
+        "click": "button[type=submit]"
+      },
+      {
+        "wait_path_not": "/login"
+      }
+    ],
+    "signed_in": {
+      "request": {
+        "method": "GET",
+        "path": "/api/me"
+      },
+      "json_pointer": "/user/id",
+      "not_null": true
+    }
+  },
+  "operations": [
+    {
+      "name": "get_note",
+      "description": "Read one note from its page.",
+      "effect": "read",
+      "execution": "http.form_html",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        }
+      },
+      "request": {
+        "method": "GET",
+        "path": "/notes/{{input.id}}"
+      },
+      "response": {
+        "success_status": [
+          200
+        ],
+        "extract": {
+          "id": {
+            "css": "article",
+            "attr": "data-id"
+          },
+          "title": {
+            "css": "article h1"
+          },
+          "body": {
+            "css": "article p"
+          }
+        }
+      }
+    },
+    {
+      "name": "find_note_by_ref",
+      "description": "Find a note in the list by its reference.",
+      "effect": "read",
+      "execution": "http.form_html",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "ref"
+        ],
+        "properties": {
+          "ref": {
+            "type": "string"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          }
+        }
+      },
+      "request": {
+        "method": "GET",
+        "path": "/notes"
+      },
+      "response": {
+        "success_status": [
+          200
+        ],
+        "extract": {
+          "id": {
+            "css": "li.note",
+            "attr": "data-id",
+            "text": "{{input.ref}}"
+          }
+        }
+      }
+    },
+    {
+      "name": "create_note",
+      "description": "Create a note through its form.",
+      "effect": "write",
+      "destructive": false,
+      "execution": "http.form_html",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          }
+        }
+      },
+      "request": {
+        "method": "POST",
+        "path": "/notes",
+        "form_page": {
+          "path": "/notes/new",
+          "selector": "form#new-note"
+        },
+        "form": {
+          "title": "{{input.title}}",
+          "body": "{{input.body}}",
+          "ref": "{{receipt.marker}}"
+        }
+      },
+      "response": {
+        "redirect_success": "^/notes/[0-9]+$",
+        "extract": {
+          "id": {
+            "location_regex": "^/notes/([0-9]+)$"
+          }
+        },
+        "identifier": "id",
+        "refused_when": [
+          {
+            "css": "p.error"
+          }
+        ],
+        "success_status": [
+          200
+        ]
+      },
+      "reconcile": {
+        "strategy": "marker",
+        "operation": "find_note_by_ref",
+        "input": {
+          "ref": "{{receipt.marker}}"
+        },
+        "found": "/id"
+      }
+    }
+  ],
+  "provenance": {
+    "built_by": "hand-authored test fixture"
+  }
+}

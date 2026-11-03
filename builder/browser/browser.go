@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -386,6 +387,13 @@ func (b *Browser) Fetch(ctx context.Context, in *integration.Compiled, req capab
 	defer cancel()
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
+	var redirect func() (int, string)
+	if req.WantLocation {
+		redirect, err = b.watchRedirect(ectx, req.Method, req.URL)
+		if err != nil {
+			return capability.FetchResult{}, fmt.Errorf("%w: %v", capability.ErrNotSent, err)
+		}
+	}
 	out, err := chromedp.Run(ectx, chromedp.Evaluate[string](fmt.Sprintf(fetchJS, capability.MaxBody, pj), chromedp.EvalAwaitPromise))
 	if err != nil {
 		return capability.FetchResult{}, fmt.Errorf("in-page request: %w", err)
@@ -400,7 +408,11 @@ func (b *Browser) Fetch(ctx context.Context, in *integration.Compiled, req capab
 	if a.Redir {
 		// Operations never follow redirects; the runtime decides what a
 		// redirect means for a write.
-		return capability.FetchResult{Redirected: true}, nil
+		res := capability.FetchResult{Redirected: true}
+		if redirect != nil {
+			res.Status, res.Location = redirect()
+		}
+		return res, nil
 	}
 	if a.Err != "" {
 		// Sent, but the answer could not be read (for example, too large).
@@ -415,6 +427,75 @@ func (b *Browser) Fetch(ctx context.Context, in *integration.Compiled, req capab
 		h.Set(k, v)
 	}
 	return capability.FetchResult{Status: a.Status, Headers: h, Body: body}, nil
+}
+
+// watchRedirect reports the status and Location of the redirect answering the
+// next request with this method and URL. A page's fetch can't read them, so
+// they come from the browser's own network events. The result is 0 and "" when
+// they didn't arrive in time, or when two requests match and so the answer
+// can't be told apart. The caller then treats the redirect as undeclared.
+func (b *Browser) watchRedirect(ctx context.Context, method, target string) (func() (int, string), error) {
+	sent := chromedp.Events(ctx, network.RequestWillBeSent)
+	extra := chromedp.Events(ctx, network.ResponseReceivedExtraInfo)
+	if _, err := chromedp.Call(ctx, network.Enable, network.EnableParams{}); err != nil {
+		return nil, err
+	}
+	var mu sync.Mutex
+	ids := map[network.RequestID]bool{}
+	answers := map[network.RequestID]*network.EventResponseReceivedExtraInfo{}
+	go func() {
+		for ev, err := range sent {
+			if err != nil {
+				return
+			}
+			if ev.Request != nil && ev.Request.Method == method && ev.Request.URL == target {
+				mu.Lock()
+				ids[ev.RequestID] = true
+				mu.Unlock()
+			}
+		}
+	}()
+	go func() {
+		for ev, err := range extra {
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			answers[ev.RequestID] = &ev
+			mu.Unlock()
+		}
+	}()
+	read := func() (int, string, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(ids) != 1 {
+			return 0, "", false
+		}
+		for id := range ids {
+			if a := answers[id]; a != nil {
+				for k, v := range a.Headers {
+					if strings.EqualFold(k, "Location") {
+						return int(a.StatusCode), fmt.Sprint(v), true
+					}
+				}
+				return int(a.StatusCode), "", true
+			}
+		}
+		return 0, "", false
+	}
+	return func() (int, string) {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if status, loc, ok := read(); ok || time.Now().After(deadline) {
+				return status, loc
+			}
+			select {
+			case <-ctx.Done():
+				return 0, ""
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}, nil
 }
 
 // onOrigin navigates to the origin when the page is elsewhere.
