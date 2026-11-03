@@ -591,3 +591,65 @@ func TestParseFormFixtureAndRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestParseStepsFixtureAndRefusals(t *testing.T) {
+	if _, err := LoadFile("testdata/notes-steps.json"); err != nil {
+		t.Fatal(err)
+	}
+	steps := func(o map[string]any) []any { return o["steps"].([]any) }
+	step := func(o map[string]any, i int) map[string]any { return steps(o)[i].(map[string]any) }
+	cases := []struct {
+		name string
+		edit func(m, o map[string]any)
+		want string
+	}{
+		{"no commit step", func(_, o map[string]any) { delete(step(o, 4), "commit") }, "exactly one commit"},
+		{"two commit steps", func(_, o map[string]any) { step(o, 0)["commit"] = true }, "exactly one commit"},
+		{"commit on a fill", func(_, o map[string]any) { delete(step(o, 4), "commit"); step(o, 1)["commit"] = true }, "must be click or navigate"},
+		{"anchored commit without expect", func(_, o map[string]any) {
+			step(o, 4)["text"] = "Save"
+			delete(step(o, 4), "expect")
+		}, "needs expect"},
+		{"two actions in a step", func(_, o map[string]any) { step(o, 0)["click"] = "a" }, "exactly one of"},
+		{"credential in a value", func(_, o map[string]any) { step(o, 1)["value"] = "{{credential.password}}" }, "not allowed"},
+		{"receipt in a navigate", func(_, o map[string]any) { step(o, 0)["navigate"] = "/{{receipt.marker}}" }, "not allowed"},
+		{"undeclared input", func(_, o map[string]any) { step(o, 1)["value"] = "{{input.nope}}" }, "not a property"},
+		{"steps and a request", func(_, o map[string]any) { o["request"] = map[string]any{"method": "POST", "path": "/x"} }, "not a request"},
+		{"no identifier", func(_, o map[string]any) { delete(o["response"].(map[string]any), "identifier") }, "response.identifier"},
+		{"marker never typed", func(_, o map[string]any) { step(o, 3)["value"] = "{{input.title}}" }, "needs {{receipt.marker}}"},
+		{"another provider", func(m, _ map[string]any) { m["session"] = map[string]any{"provider": "none"} }, "needs session provider browser"},
+		{"commit step on a read", func(m, _ map[string]any) { step(op(m, 0), 0)["commit"] = true }, "a read has no commit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := mutateFile(t, "testdata/notes-steps.json", func(m map[string]any) { tc.edit(m, op(m, 2)) })
+			_, err := Parse(b)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestStepsReadThatClicksCanBeAttested(t *testing.T) {
+	b := mutateFile(t, "testdata/notes-steps.json", func(m map[string]any) {
+		o := op(m, 0)
+		o["reviewed_safe_method"] = true
+		s := o["steps"].([]any)[0].(map[string]any)
+		delete(s, "navigate")
+		s["click"] = "#open"
+	})
+	if _, err := Parse(b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStepsAnswerReadsTheFinalURL(t *testing.T) {
+	o := &Operation{Execution: ExecBrowserSteps, Response: ResponseSpec{Extract: map[string]Extract{"id": {LocationRegex: "^/notes/([0-9]+)$"}}}}
+	if got := o.ExtractValues("http://a.test", Answer{Status: 200, Location: "http://a.test/notes/7"}, Vars{})["id"]; got != "7" {
+		t.Errorf("id = %q, want 7", got)
+	}
+	if got, ok := o.ExtractValues("http://a.test", Answer{Status: 200, Location: "https://evil.test/notes/7"}, Vars{})["id"]; ok {
+		t.Errorf("read %q from a page on another origin", got)
+	}
+}

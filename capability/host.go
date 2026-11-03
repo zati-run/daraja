@@ -53,12 +53,27 @@ type FetchResult struct {
 	Location string
 }
 
+// StepsResult is how a browser.steps plan ended.
+type StepsResult struct {
+	Body     []byte // the final page
+	Location string // the final page's URL
+	// Err is set when the plan did not finish. Committed reports whether it
+	// had reached its commit step. Drift reports a page that no longer matches
+	// the plan.
+	Err       error
+	Committed bool
+	Drift     bool
+}
+
 // Page is one dedicated browser profile serving one credential binding.
 // Its session never leaves it.
 type Page interface {
 	// Fetch runs a same-origin request inside the page with the page's own
 	// cookies. Errors that happen before dispatch wrap ErrNotSent.
 	Fetch(ctx context.Context, in *integration.Compiled, req FetchRequest) (FetchResult, error)
+	// RunSteps drives the application's interface through a browser.steps
+	// plan, on the source origin, and reports the final page.
+	RunSteps(ctx context.Context, in *integration.Compiled, steps []integration.Step) StepsResult
 	// Recover tries to restore a signed-in session without blocking on a
 	// person. It returns ErrNeedsHuman when a person must act, after making
 	// the step visible to them.
@@ -215,6 +230,9 @@ func (h *Host) Execute(ctx context.Context, job Job) Outcome {
 	if op.Effect == integration.EffectWrite {
 		vars.Receipt = map[string]string{"marker": job.Marker}
 	}
+	if op.Kind() == integration.ExecBrowserSteps {
+		return h.runSteps(ctx, b, in, op, vars)
+	}
 	fields, out, ok := h.formFields(ctx, b, in, op, vars, values)
 	if !ok {
 		return out
@@ -267,6 +285,34 @@ func sessionHeaders(in *integration.Compiled, values, headers map[string]string)
 		headers[k] = v
 	}
 	return Outcome{}, true
+}
+
+// runSteps runs a browser.steps plan. Only a failure before its commit step
+// proves that nothing was sent.
+func (h *Host) runSteps(ctx context.Context, b *hostBinding, in *integration.Compiled, op *integration.CompiledOp, vars integration.Vars) Outcome {
+	steps, err := op.RenderSteps(vars)
+	if err != nil {
+		return notSent(CodeInvalidInput, "%v", err)
+	}
+	res := b.Page.RunSteps(ctx, in, steps)
+	switch {
+	case res.Err == nil:
+		h.log.Info("executed", "binding", b.Name, "integration", in.ID, "operation", op.Name, "steps", len(steps))
+		return Outcome{Dispatch: Sent, Status: http.StatusOK, Body: res.Body, Location: res.Location}
+	case res.Committed:
+		b.dropSession(in.ID)
+		h.log.Warn("steps outcome unknown", "integration", in.ID, "operation", op.Name, "error", res.Err)
+		return Outcome{Dispatch: Unknown, Code: CodeLost, Detail: "the plan did not finish after its commit step: " + res.Err.Error()}
+	case errors.Is(res.Err, ErrHumanActive):
+		return notSent(CodeNeedsHuman, "%v", res.Err)
+	case res.Drift:
+		// It may be an expired session on a sign-in page; check it next time.
+		b.dropSession(in.ID)
+		return notSent(CodeSourceChanged, "%v", res.Err)
+	default:
+		b.dropSession(in.ID)
+		return notSent(CodeSession, "%v", res.Err)
+	}
 }
 
 // formFields fetches the operation's form page, if it has one, and reads the

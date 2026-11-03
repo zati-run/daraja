@@ -152,14 +152,16 @@ type Operation struct {
 	// after confirming the request has no effect; the method alone never
 	// decides the effect class.
 	ReviewedSafeMethod bool `json:"reviewed_safe_method,omitempty"`
-	// Execution is how the operation runs: http.json (the default) or
-	// http.form_html.
+	// Execution is how the operation runs: http.json (the default),
+	// http.form_html or browser.steps.
 	Execution    string          `json:"execution,omitempty"`
 	InputSchema  json.RawMessage `json:"input_schema"`
 	OutputSchema json.RawMessage `json:"output_schema"`
 	Request      RequestSpec     `json:"request"`
-	Response     ResponseSpec    `json:"response"`
-	Reconcile    *Reconcile      `json:"reconcile,omitempty"`
+	// Steps is the plan of a browser.steps operation.
+	Steps     []Step       `json:"steps,omitempty"`
+	Response  ResponseSpec `json:"response"`
+	Reconcile *Reconcile   `json:"reconcile,omitempty"`
 }
 
 // RequestSpec is a request template.
@@ -522,7 +524,7 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 	}
 	switch op.Effect {
 	case EffectRead:
-		if op.Request.Method != http.MethodGet && op.Request.Method != http.MethodHead && !op.ReviewedSafeMethod {
+		if op.Kind() != ExecBrowserSteps && op.Request.Method != http.MethodGet && op.Request.Method != http.MethodHead && !op.ReviewedSafeMethod {
 			add("%s: a read using %s needs reviewed_safe_method; reads and writes stay separate", where, op.Request.Method)
 		}
 		if op.Destructive != nil && *op.Destructive {
@@ -558,37 +560,12 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 			add("%s: input field idempotency_key is reserved", where)
 		}
 	}
-	if !slices.Contains(methods, op.Request.Method) {
-		add("%s: request.method %q is not supported", where, op.Request.Method)
-	}
 	inputRoots := map[string]bool{"input": true}
 	if op.Effect == EffectWrite {
 		inputRoots["receipt"] = true
 	}
-	checkPath(where+".request.path", op.Request.Path, add)
-	checkTemplate(where+".request.path", op.Request.Path, inputRoots, add)
-	for k, v := range op.Request.Query {
-		checkTemplate(where+".request.query."+k, v, inputRoots, add)
-	}
-	for k, v := range op.Request.Headers {
-		checkHeader(where+".request.headers", k, v, inputRoots, add)
-	}
-	if len(op.Request.Body) > 0 && len(op.Request.Form) > 0 {
-		add("%s: request takes body or form, not both", where)
-	}
-	if len(op.Request.Body) > 0 {
-		var tree any
-		if err := json.Unmarshal(op.Request.Body, &tree); err != nil {
-			add("%s: request.body is not JSON: %v", where, err)
-		} else {
-			walkStrings(tree, func(s string) { checkTemplate(where+".request.body", s, inputRoots, add) })
-		}
-	}
-	for k, v := range op.Request.Form {
-		checkTemplate(where+".request.form."+k, v, inputRoots, add)
-	}
-	if (len(op.Request.Body) > 0 || len(op.Request.Form) > 0) && (op.Request.Method == http.MethodGet || op.Request.Method == http.MethodHead) {
-		add("%s: GET and HEAD take no body", where)
+	if op.Kind() != ExecBrowserSteps {
+		c.validateRequest(op, where, inputRoots, add)
 	}
 	// Every input reference must name a declared input property.
 	if props := schemaProps(op.InputSchema); props != nil {
@@ -600,7 +577,7 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 			}
 		}
 	}
-	if len(op.Response.SuccessStatus) == 0 && op.Response.RedirectSuccess == "" {
+	if len(op.Response.SuccessStatus) == 0 && op.Response.RedirectSuccess == "" && op.Kind() != ExecBrowserSteps {
 		add("%s: response.success_status is required", where)
 	}
 	for k, ptr := range op.Response.Output {
@@ -669,6 +646,38 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 	}
 }
 
+// validateRequest checks an operation that sends a request.
+func (c *Compiled) validateRequest(op *Operation, where string, inputRoots map[string]bool, add func(string, ...any)) {
+	if !slices.Contains(methods, op.Request.Method) {
+		add("%s: request.method %q is not supported", where, op.Request.Method)
+	}
+	checkPath(where+".request.path", op.Request.Path, add)
+	checkTemplate(where+".request.path", op.Request.Path, inputRoots, add)
+	for k, v := range op.Request.Query {
+		checkTemplate(where+".request.query."+k, v, inputRoots, add)
+	}
+	for k, v := range op.Request.Headers {
+		checkHeader(where+".request.headers", k, v, inputRoots, add)
+	}
+	if len(op.Request.Body) > 0 && len(op.Request.Form) > 0 {
+		add("%s: request takes body or form, not both", where)
+	}
+	if len(op.Request.Body) > 0 {
+		var tree any
+		if err := json.Unmarshal(op.Request.Body, &tree); err != nil {
+			add("%s: request.body is not JSON: %v", where, err)
+		} else {
+			walkStrings(tree, func(s string) { checkTemplate(where+".request.body", s, inputRoots, add) })
+		}
+	}
+	for k, v := range op.Request.Form {
+		checkTemplate(where+".request.form."+k, v, inputRoots, add)
+	}
+	if (len(op.Request.Body) > 0 || len(op.Request.Form) > 0) && (op.Request.Method == http.MethodGet || op.Request.Method == http.MethodHead) {
+		add("%s: GET and HEAD take no body", where)
+	}
+}
+
 // validateExecution checks what depends on the operation's execution kind.
 func (c *Compiled) validateExecution(op *Operation, where string, add func(string, ...any)) {
 	resp, req := &op.Response, &op.Request
@@ -718,7 +727,7 @@ func (c *Compiled) validateExecution(op *Operation, where string, add func(strin
 			if !valueNameRE.MatchString(name) {
 				add("%s: response.extract: bad name %q", where, name)
 			}
-			validateExtract(where+".response.extract."+name, e, add)
+			validateExtract(where+".response.extract."+name, e, map[string]bool{"input": true}, add)
 		}
 		if resp.RedirectSuccess != "" {
 			if _, err := compileLocationRegex(resp.RedirectSuccess); err != nil {
@@ -737,8 +746,10 @@ func (c *Compiled) validateExecution(op *Operation, where string, add func(strin
 				add("%s: request.form_page needs method POST", where)
 			}
 		}
+	case ExecBrowserSteps:
+		c.validateSteps(op, where, add)
 	default:
-		add("%s: execution %q is not http.json or http.form_html", where, op.Execution)
+		add("%s: execution %q is not http.json, http.form_html or browser.steps", where, op.Execution)
 	}
 }
 
@@ -786,6 +797,11 @@ func opRefs(op *Operation) []ref {
 	}
 	for _, e := range op.Response.Extract {
 		out = append(out, templateRefs(e.Text)...)
+	}
+	for _, st := range op.Steps {
+		out = append(out, templateRefs(st.Navigate)...)
+		out = append(out, templateRefs(st.Value)...)
+		out = append(out, templateRefs(st.Text)...)
 	}
 	if len(op.Request.Body) > 0 {
 		var tree any

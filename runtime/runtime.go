@@ -406,8 +406,14 @@ func (r *Runtime) write(ctx context.Context, p *Principal, in *integration.Compi
 	marker := Marker(key)
 	vars := integration.Vars{Input: input, Receipt: map[string]string{"marker": marker}}
 	// Render before recording, so a render failure records nothing.
-	if _, err := op.Build(in.Source.Origin, vars, nil); err != nil {
-		return nil, errf(CodeInvalidInput, "%v", err)
+	var renderErr error
+	if op.Kind() == integration.ExecBrowserSteps {
+		_, renderErr = op.RenderSteps(vars)
+	} else {
+		_, renderErr = op.Build(in.Source.Origin, vars, nil)
+	}
+	if renderErr != nil {
+		return nil, errf(CodeInvalidInput, "%v", renderErr)
 	}
 	rec, err := r.journal.Begin(journal.Receipt{Key: key, Principal: p.ID, Integration: in.ID, Operation: op.Name, Marker: marker, InputSHA256: inputHash})
 	if errors.Is(err, journal.ErrExists) {

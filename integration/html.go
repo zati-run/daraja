@@ -69,7 +69,7 @@ type Answer struct {
 	Location string
 }
 
-func validateExtract(where string, e Extract, add func(string, ...any)) {
+func validateExtract(where string, e Extract, roots map[string]bool, add func(string, ...any)) {
 	n := 0
 	for _, set := range []bool{e.CSS != "", e.LocationRegex != "", e.JSONPointer != ""} {
 		if set {
@@ -87,7 +87,7 @@ func validateExtract(where string, e Extract, add func(string, ...any)) {
 			add("%s: css %q: %v", where, e.CSS, err)
 		}
 	}
-	checkTemplate(where+".text", e.Text, map[string]bool{"input": true}, add)
+	checkTemplate(where+".text", e.Text, roots, add)
 	if e.LocationRegex != "" {
 		re, err := compileLocationRegex(e.LocationRegex)
 		if err != nil {
@@ -192,8 +192,8 @@ func (o *Operation) ExtractValues(origin string, a Answer, v Vars) map[string]st
 			}
 		case e.LocationRegex != "":
 			// A Location header on any other answer, such as a 200 sign-in
-			// page, shows nothing.
-			if !a.isRedirect() {
+			// page, shows nothing. A plan's Location is the page it ended on.
+			if o.Kind() != ExecBrowserSteps && !a.isRedirect() {
 				continue
 			}
 			p, ok := redirectPath(origin, a.Location)
