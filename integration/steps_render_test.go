@@ -16,6 +16,8 @@ func TestStepsOriginMustMatchBrowserCanonicalForm(t *testing.T) {
 		{"https://Example.com", true}, {"https://example.com/", true},
 		{"https://example.com:443", true}, {"http://127.0.0.1:80", true},
 		{"https://example.com:0443", true}, {"http://127.1", true},
+		{"https://example.com:", true}, {"https://example.com?", true},
+		{"https://0x7f.0.0.1", true},
 		{"https://[2001:0db8::1]", true}, {"https://é.example", true},
 		{"https://[2001:db8::1]", false},
 		{"https://example.com#fragment", true},

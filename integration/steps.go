@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/andybalholm/cascadia"
@@ -45,7 +46,7 @@ type Expect struct {
 func (c *Compiled) validateSteps(op *Operation, where string, add func(string, ...any)) {
 	if u, err := url.Parse(c.Source.Origin); err == nil && u.Host != "" {
 		host, port := u.Hostname(), u.Port()
-		noncanonical := u.User != nil || u.Fragment != "" || u.Path != "" || u.Host != strings.ToLower(u.Host) || (len(port) > 1 && port[0] == '0') || (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")
+		noncanonical := u.User != nil || u.Fragment != "" || u.ForceQuery || u.Path != "" || strings.HasSuffix(u.Host, ":") || u.Host != strings.ToLower(u.Host) || (len(port) > 1 && port[0] == '0') || (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")
 		for _, r := range host {
 			if r > 127 {
 				noncanonical = true
@@ -53,8 +54,15 @@ func (c *Compiled) validateSteps(op *Operation, where string, add func(string, .
 		}
 		if ip, err := netip.ParseAddr(host); err == nil {
 			noncanonical = noncanonical || ip.String() != host
-		} else if strings.Contains(host, ":") || strings.Trim(host, "0123456789.") == "" {
-			noncanonical = true
+		} else {
+			last := strings.TrimSuffix(host, ".")
+			if i := strings.LastIndexByte(last, '.'); i >= 0 {
+				last = last[i+1:]
+			}
+			_, numeric := strconv.ParseUint(last, 0, 64)
+			if strings.Contains(host, ":") || numeric == nil || (last != "" && strings.Trim(last, "0123456789") == "") {
+				noncanonical = true
+			}
 		}
 		if noncanonical {
 			add("%s: browser.steps source.origin must be a canonical browser origin (lowercase host, no trailing slash or default port)", where)
