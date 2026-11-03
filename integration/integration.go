@@ -178,6 +178,40 @@ type ResponseSpec struct {
 	// Identifier is a JSON Pointer to the identifier of the record a write
 	// created or changed. It is stored in the receipt.
 	Identifier string `json:"identifier,omitempty"`
+	// RefusedWhen lists answers that are definite failures even with a success
+	// status, such as a GraphQL failure sent with HTTP 200. An answer that
+	// matches one and also carries the declared identifier contradicts itself,
+	// so a write answered that way stays uncertain.
+	RefusedWhen []Refusal `json:"refused_when,omitempty"`
+}
+
+// Refusal matches a reviewed failure shape in a JSON response.
+type Refusal struct {
+	JSONPointer string `json:"json_pointer"`
+	// Equals is compared with the scalar at JSONPointer as a string, so
+	// "false" matches JSON false and "7" matches JSON 7.
+	Equals string `json:"equals"`
+}
+
+// Refused reports whether a response body matches a declared failure shape.
+func (o *Operation) Refused(body []byte) bool {
+	if len(o.Response.RefusedWhen) == 0 {
+		return false
+	}
+	var doc any
+	if json.Unmarshal(body, &doc) != nil {
+		return false
+	}
+	for _, r := range o.Response.RefusedWhen {
+		v, ok := Lookup(doc, r.JSONPointer)
+		if !ok {
+			continue
+		}
+		if s, err := scalarString(v); err == nil && s == r.Equals {
+			return true
+		}
+	}
+	return false
 }
 
 // Reconcile says how an uncertain write is resolved from the source.
@@ -510,6 +544,14 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 	}
 	if op.Response.Identifier != "" && !validPointer(op.Response.Identifier) {
 		add("%s: response.identifier is not a JSON Pointer", where)
+	}
+	for i, r := range op.Response.RefusedWhen {
+		if r.JSONPointer == "" || !validPointer(r.JSONPointer) {
+			add("%s: response.refused_when[%d].json_pointer must be a non-empty JSON Pointer", where, i)
+		}
+		if r.Equals == "" {
+			add("%s: response.refused_when[%d].equals is required", where, i)
+		}
 	}
 	if r := op.Reconcile; r != nil && op.Effect == EffectWrite {
 		switch r.Strategy {
