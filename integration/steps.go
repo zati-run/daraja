@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/andybalholm/cascadia"
 )
@@ -222,6 +223,24 @@ func (o *Operation) RenderSteps(v Vars) ([]Step, error) {
 		}
 		if st.Value != "" {
 			valueRefs := templateRefs(st.Value)
+			if !committed && (st.Fill != "" || st.Select != "") {
+				for _, r := range valueRefs {
+					if !proof[r] {
+						continue
+					}
+					value, err := v.lookup(r)
+					if err != nil {
+						return nil, err
+					}
+					s, err := scalarString(value)
+					if err != nil {
+						return nil, err
+					}
+					if strings.TrimSpace(s) == "" {
+						return nil, fmt.Errorf("write proof value {{%s.%s}} is empty", r.root, r.name)
+					}
+				}
+			}
 			st.Value, err = v.RenderString(st.Value, nil)
 			if errors.Is(err, ErrAbsent) {
 				if !committed && (st.Fill != "" || st.Select != "") {

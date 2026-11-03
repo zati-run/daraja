@@ -33,11 +33,16 @@ func TestStepsProofRequiresInputUsedBeforeCommit(t *testing.T) {
 func TestRenderStepsRequiresProofInputBeforeCommit(t *testing.T) {
 	op := Operation{
 		Effect:   EffectWrite,
-		Response: ResponseSpec{Identifier: "id", Extract: map[string]Extract{"id": {Text: "{{input.title}}"}}},
+		Response: ResponseSpec{Identifier: "id", Extract: map[string]Extract{"id": {Text: "prefix {{input.title}}"}}},
 		Steps:    []Step{{Fill: "#title", Value: "{{input.title}}"}, {Click: "#submit", Commit: true}},
 	}
 	if steps, err := op.RenderSteps(Vars{}); !errors.Is(err, ErrAbsent) || steps != nil {
 		t.Fatalf("missing proof: steps=%v err=%v", steps, err)
+	}
+	for _, value := range []string{"", "  "} {
+		if steps, err := op.RenderSteps(Vars{Input: map[string]any{"title": value}}); err == nil || steps != nil {
+			t.Fatalf("empty proof %q: steps=%v err=%v", value, steps, err)
+		}
 	}
 	steps, err := op.RenderSteps(Vars{Input: map[string]any{"title": "hello"}})
 	if err != nil || len(steps) != 2 || steps[0].Value != "hello" {
