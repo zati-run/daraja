@@ -3,7 +3,6 @@ package explore
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/runtime"
@@ -32,17 +31,10 @@ type socketGuard struct {
 	life context.Context // ends with the walk
 	wg   *sync.WaitGroup
 
-	mu       sync.Mutex
-	armed    int                       // workers started with sockets removed
-	held     map[target.SessionID]bool // targets kept paused, until they are gone
-	heldEver int                       // how many targets were ever kept paused
-	gone     map[target.SessionID]bool // detached before their attach event was handled
-	// heldWorker reports a held service worker. Stopping one doesn't last: the
-	// browser restarts it to finish installing, so only closing the browser
-	// keeps it from running without the guards.
-	heldWorker bool
-	running    int // targets already running when attached
-	attached   []context.CancelFunc
+	mu      sync.Mutex
+	armed   int                       // workers started with sockets removed
+	held    map[target.SessionID]bool // targets kept paused
+	running int                       // targets already running when attached
 }
 
 var autoAttachPaused = target.SetAutoAttachParams{AutoAttach: true, WaitForDebuggerOnStart: true, Flatten: ptrBool(true)}
@@ -50,7 +42,7 @@ var autoAttachPaused = target.SetAutoAttachParams{AutoAttach: true, WaitForDebug
 func ptrBool(b bool) *bool { return &b }
 
 func newSocketGuard(root, life context.Context, wg *sync.WaitGroup) *socketGuard {
-	return &socketGuard{root: root, life: life, wg: wg, held: map[target.SessionID]bool{}, gone: map[target.SessionID]bool{}}
+	return &socketGuard{root: root, life: life, wg: wg, held: map[target.SessionID]bool{}}
 }
 
 // armTab arms a tab (or a worker) session: its related targets start
@@ -60,7 +52,6 @@ func (g *socketGuard) armTab(ctx context.Context) error {
 	ectx, ecancel := context.WithCancel(ctx)
 	context.AfterFunc(g.life, ecancel)
 	evs := chromedp.Events(ectx, target.AttachedToTarget)
-	gone := chromedp.Events(ectx, target.DetachedFromTarget)
 	p := autoAttachPaused
 	p.Filter = target.Filter{{Type: "page", Exclude: true}, {Type: "browser", Exclude: true}, {Type: "tab", Exclude: true}, {}}
 	if _, err := chromedp.Call(ctx, target.SetAutoAttach, p); err != nil {
@@ -75,16 +66,6 @@ func (g *socketGuard) armTab(ctx context.Context) error {
 				return
 			}
 			g.handle(ev)
-		}
-	}()
-	g.wg.Add(1)
-	go func() {
-		defer g.wg.Done()
-		for ev, err := range gone {
-			if err != nil {
-				return
-			}
-			g.detached(ev.SessionID)
 		}
 	}()
 	return nil
@@ -120,11 +101,6 @@ func (g *socketGuard) handle(ev target.EventAttachedToTarget) {
 			}
 		}()
 	default: // a cross-site frame or a service worker cannot be attached while paused
-		if ev.TargetInfo.Type == "service_worker" {
-			g.mu.Lock()
-			g.heldWorker = true
-			g.mu.Unlock()
-		}
 		g.hold(ev.SessionID)
 	}
 }
@@ -134,9 +110,7 @@ func (g *socketGuard) handle(ev target.EventAttachedToTarget) {
 // left paused.
 func (g *socketGuard) armWorker(id target.ID) bool {
 	wctx, wcancel := chromedp.NewContext(g.root, chromedp.WithTargetID(id), chromedp.WithDetachOnCancel())
-	g.mu.Lock()
-	g.attached = append(g.attached, wcancel)
-	g.mu.Unlock()
+	context.AfterFunc(g.life, wcancel)
 	if err := chromedp.Do(wctx); err != nil {
 		return false
 	}
@@ -158,53 +132,6 @@ func (g *socketGuard) armWorker(id target.ID) bool {
 
 func (g *socketGuard) hold(s target.SessionID) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.heldEver++
-	if !g.gone[s] {
-		g.held[s] = true
-	}
-}
-
-// detached records a target going away. Attach and detach events have separate
-// consumers, so a detach can be handled first.
-func (g *socketGuard) detached(s target.SessionID) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.held, s)
-	g.gone[s] = true
-}
-
-// waitHeldGone waits for the targets still held to go away, which the pages
-// that started them going away causes. It returns how many remain. Navigating
-// a page returns before its frames are gone, and a frame released while its
-// page is still there runs, with its sockets.
-func (g *socketGuard) waitHeldGone(ctx context.Context, d time.Duration) int {
-	deadline := time.Now().Add(d)
-	for {
-		g.mu.Lock()
-		n := len(g.held)
-		g.mu.Unlock()
-		if n == 0 || time.Now().After(deadline) {
-			return n
-		}
-		select {
-		case <-ctx.Done():
-			return n
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-}
-
-// disarm, after stopPages has stopped everything, stops pausing new targets and detaches from workers.
-func (g *socketGuard) disarm(tab context.Context) {
-	// Turning auto-attach off would release any target still held under the
-	// main tab, which is why the caller makes sure there are none. Then
-	// restore chromedp's own setting.
-	_, _ = chromedp.Call(tab, target.SetAutoAttach, target.SetAutoAttachParams{AutoAttach: false, Flatten: ptrBool(true)})
-	_, _ = chromedp.Call(tab, target.SetAutoAttach, target.SetAutoAttachParams{AutoAttach: true, Flatten: ptrBool(true)})
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for _, c := range g.attached {
-		c()
-	}
+	g.held[s] = true
+	g.mu.Unlock()
 }

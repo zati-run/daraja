@@ -101,8 +101,16 @@ func Open(parent context.Context, o Options) (*Browser, error) {
 	return &Browser{Ctx: ctx, cancel: func() { cancelC(); cancelA() }, opts: o, log: o.Logger}, nil
 }
 
-// Close stops Chrome. The profile stays on disk.
-func (b *Browser) Close() { b.cancel() }
+// Close stops Chrome. The process is killed first, so that nothing paused by a
+// CDP session is released when the connection drops. The profile stays on disk.
+func (b *Browser) Close() {
+	if c := chromedp.FromContext(b.Ctx); c != nil && c.Browser != nil {
+		if p := c.Browser.Process(); p != nil {
+			_ = p.Kill() // already gone on a second Close
+		}
+	}
+	b.cancel()
+}
 
 func (b *Browser) path() string {
 	loc, err := chromedp.Run(b.Ctx, chromedp.Location())
