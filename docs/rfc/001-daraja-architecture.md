@@ -68,17 +68,19 @@ hasn't separately decided, and the details below replace the sketch in
   status alone can't show that a form write worked, because most sign-in and
   validation pages answer 200.
 - **Post-redirect-get.** `response.redirect_success` is an anchored pattern for
-  a local path and query. A redirect matching it is success, unless its body
-  also matches `refused_when`. Any other redirect stays `uncertain`, so a redirect
-  to sign in is never success. A form operation can't list a 3xx in
+  a local path and query. A redirect matching it is success. Over HTTP, a body that
+  also matches `refused_when` makes it `uncertain`; in the browser a redirect's
+  body can't be read, so this isn't checked there. Any other redirect stays
+  `uncertain`. A redirect to sign in isn't success unless the reviewed pattern
+  matches its path, so the pattern must exclude such routes: `^/notes/[0-9]+$`,
+  not `^/notes/[^/]+$`. A form operation can't list a 3xx in
   `success_status`. A relative `Location` such as `notes/7` isn't read, because it
   depends on the request's path, so that write stays `uncertain`. In the page,
   `fetch` can't read a redirect's target, so the capability reads it from the
   browser's network events. If it can't tell the answer apart, the write stays
   `uncertain`.
 - `response.refused_when` also takes `css`, for a validation error on a page.
-  It applies to a status in `success_status`, or a redirect matching
-  `redirect_success`, so a form that answers 200 with its errors must list 200.
+  It applies to a status in `success_status`, so a form that answers 200 with its errors must list 200.
 - **`placement` isn't a field.** The session provider decides where an
   operation runs.
 

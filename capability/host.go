@@ -248,7 +248,7 @@ func (h *Host) Execute(ctx context.Context, job Job) Outcome {
 		h.log.Warn("in-page request outcome unknown", "integration", in.ID, "operation", op.Name, "error", err)
 		return Outcome{Dispatch: Unknown, Code: CodeLost, Detail: "the in-page request did not complete: " + err.Error()}
 	}
-	declared := res.Redirected && op.RedirectSucceeded(in.Source.Origin, integration.Answer{Location: res.Location})
+	declared := res.Redirected && op.RedirectSucceeded(in.Source.Origin, integration.Answer{Status: res.Status, Location: res.Location})
 	if (res.Redirected && !declared) || res.Status == http.StatusUnauthorized || res.Status == http.StatusForbidden {
 		// A redirect is most often an expired session sending the request
 		// to a sign-in page.

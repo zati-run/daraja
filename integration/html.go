@@ -125,6 +125,8 @@ func LocalLocation(origin, loc string) (string, bool) {
 	return u.RequestURI(), true
 }
 
+func (a Answer) isRedirect() bool { return a.Status >= 300 && a.Status < 400 }
+
 // redirectPath is the local path and query of a Location header. A location
 // relative to the request's own path can't be resolved from the origin alone, so
 // it isn't read: /auth/submit redirecting to notes/7 goes to /auth/notes/7, not
@@ -138,7 +140,7 @@ func redirectPath(origin, loc string) (string, bool) {
 
 // RedirectSucceeded reports whether a redirect is the declared success shape.
 func (o *Operation) RedirectSucceeded(origin string, a Answer) bool {
-	if o.Response.RedirectSuccess == "" {
+	if o.Response.RedirectSuccess == "" || !a.isRedirect() {
 		return false
 	}
 	p, ok := redirectPath(origin, a.Location)
@@ -170,6 +172,11 @@ func (o *Operation) ExtractValues(origin string, a Answer, v Vars) map[string]st
 				out[name] = s
 			}
 		case e.LocationRegex != "":
+			// A Location header on any other answer, such as a 200 sign-in
+			// page, shows nothing.
+			if !a.isRedirect() {
+				continue
+			}
 			p, ok := redirectPath(origin, a.Location)
 			if !ok {
 				continue
@@ -360,7 +367,13 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 func sameTarget(a, b string) bool {
 	ua, err1 := url.ParseRequestURI(a)
 	ub, err2 := url.ParseRequestURI(b)
-	return err1 == nil && err2 == nil && ua.EscapedPath() == ub.EscapedPath() && ua.Query().Encode() == ub.Query().Encode()
+	if err1 != nil || err2 != nil || ua.EscapedPath() != ub.EscapedPath() {
+		return false
+	}
+	// URL.Query would silently drop an entry it can't parse.
+	qa, err1 := url.ParseQuery(ua.RawQuery)
+	qb, err2 := url.ParseQuery(ub.RawQuery)
+	return err1 == nil && err2 == nil && qa.Encode() == qb.Encode()
 }
 
 // formAction returns the path and query the form posts to, resolved as a browser
@@ -437,11 +450,15 @@ func controlDisabled(n *html.Node) bool {
 // counts as drift.
 func formValues(doc, form *html.Node) (url.Values, map[string]bool) {
 	values, names := url.Values{}, map[string]bool{}
+	radios := map[string]*html.Node{} // the checked radio of each group
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			if n.DataAtom == atom.Datalist || n.DataAtom == atom.Template {
 				return // never submitted
+			}
+			if group, ok := checkedRadio(n); ok && ownedBy(n, form) {
+				radios[group] = n // a later one unchecks an earlier one
 			}
 			name, named := attr(n, "name")
 			named = named && name != "" && ownedBy(n, form) && !controlDisabled(n)
@@ -451,8 +468,8 @@ func formValues(doc, form *html.Node) (url.Values, map[string]bool) {
 				names[name] = true
 				t, _ := attr(n, "type")
 				switch strings.ToLower(t) {
-				case "submit", "button", "reset", "image", "file":
-				case "checkbox", "radio":
+				case "submit", "button", "reset", "image", "file", "radio":
+				case "checkbox":
 					if _, on := attr(n, "checked"); on {
 						val, ok := attr(n, "value")
 						if !ok {
@@ -480,7 +497,27 @@ func formValues(doc, form *html.Node) (url.Values, map[string]bool) {
 		}
 	}
 	walk(doc)
+	for group, n := range radios {
+		if !controlDisabled(n) {
+			val, ok := attr(n, "value")
+			if !ok {
+				val = "on"
+			}
+			values.Add(group, val)
+		}
+	}
 	return values, names
+}
+
+// checkedRadio returns the group of a radio button marked checked.
+func checkedRadio(n *html.Node) (string, bool) {
+	if n.DataAtom != atom.Input {
+		return "", false
+	}
+	t, _ := attr(n, "type")
+	name, _ := attr(n, "name")
+	_, on := attr(n, "checked")
+	return name, on && name != "" && strings.EqualFold(t, "radio")
 }
 
 // crlf normalizes newlines as a browser does when it submits a textarea.
