@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/andybalholm/cascadia"
 	"golang.org/x/net/html"
@@ -141,6 +142,11 @@ func (a Answer) isRedirect() bool {
 // it isn't read: /auth/submit redirecting to notes/7 goes to /auth/notes/7, not
 // /notes/7.
 func redirectPath(origin, loc string) (string, bool) {
+	// A browser reads a backslash as a slash and drops tabs, newlines and
+	// surrounding spaces, so /\\evil.test leaves the origin. Go's parser doesn't.
+	if strings.ContainsFunc(loc, func(r rune) bool { return r == '\\' || r <= ' ' || r == 0x7f }) {
+		return "", false
+	}
 	if u, err := url.Parse(loc); err != nil || (!u.IsAbs() && !strings.HasPrefix(loc, "/")) {
 		return "", false
 	}
@@ -321,6 +327,10 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 	sel, err := cascadia.ParseGroup(fp.Selector)
 	if err != nil {
 		return nil, fmt.Errorf("form selector: %w", err)
+	}
+	// A browser would replace invalid bytes, so a value holding them would differ.
+	if !utf8.Valid(page) {
+		return nil, fmt.Errorf("%w: the form page isn't valid UTF-8", ErrSourceChanged)
 	}
 	doc, err := parsePage(page)
 	if err != nil {

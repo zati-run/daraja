@@ -346,6 +346,13 @@ func TestTemplateContentsMatchNothing(t *testing.T) {
 	}
 }
 
+func TestFormPageWithInvalidUTF8IsDrift(t *testing.T) {
+	page := []byte("<form id=\"f\" method=\"post\" action=\"/notes\"><input name=\"title\"><input type=\"hidden\" name=\"target\" value=\"\xff\"></form>")
+	if _, err := formOp(nil).FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "t"}}); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("err = %v, want ErrSourceChanged", err)
+	}
+}
+
 func TestDuplicateFormIDIsDrift(t *testing.T) {
 	page := []byte(`<div id="f"></div><form id="f" method="post" action="/notes"><input name="title"><input form="f" type="hidden" name="delete" value="1"></form>`)
 	o := formOp(func(o *Operation) { o.Request.FormPage.Selector = "form#f" })
@@ -445,7 +452,7 @@ func TestLocationOnAnOrdinaryAnswerIsNotRead(t *testing.T) {
 
 func TestRelativeRedirectIsNotRead(t *testing.T) {
 	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/[0-9]+$", Extract: map[string]Extract{"id": {LocationRegex: "^/notes/([0-9]+)$"}}}}
-	for loc, want := range map[string]bool{"notes/7": false, "./notes/7": false, "/notes/7": true, "http://a.test/notes/7": true, "//evil.test/notes/7": false} {
+	for loc, want := range map[string]bool{"notes/7": false, "./notes/7": false, "/notes/7": true, "http://a.test/notes/7": true, "//evil.test/notes/7": false, `/\evil.test/notes/7`: false, "/\t/evil.test/notes/7": false, " /notes/7": false} {
 		if got := o.RedirectSucceeded("http://a.test", Answer{Status: 303, Location: loc}); got != want {
 			t.Errorf("RedirectSucceeded(%s) = %v, want %v", loc, got, want)
 		}
