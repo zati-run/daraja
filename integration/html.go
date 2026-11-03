@@ -335,6 +335,9 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 	if enc, ok := attr(form, "enctype"); ok && !strings.EqualFold(enc, "application/x-www-form-urlencoded") {
 		return nil, fmt.Errorf("%w: the form's encoding changed", ErrSourceChanged)
 	}
+	if !utf8Page(doc, form) {
+		return nil, fmt.Errorf("%w: the form's encoding changed", ErrSourceChanged)
+	}
 	pagePath, err := o.FormPagePath(v)
 	if err != nil {
 		return nil, err
@@ -490,6 +493,9 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 			}
 			name, named := attr(n, "name")
 			named = named && name != "" && ownedBy(n, form) && !controlDisabled(n)
+			if named && unreproducible(n, name) {
+				computed[name] = true
+			}
 			switch {
 			case !named:
 			case n.DataAtom == atom.Input:
@@ -526,7 +532,7 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 				}
 			case n.DataAtom == atom.Textarea:
 				names[name] = atom.Textarea
-				values.Add(name, crlf(rawText(n)))
+				values.Add(name, rawText(n))
 			case n.DataAtom == atom.Select:
 				names[name] = atom.Select
 				if _, sized := attr(n, "size"); sized {
@@ -554,7 +560,71 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 	for name := range overridden {
 		delete(names, name)
 	}
+	// A browser converts newlines in every value it submits.
+	for _, vs := range values {
+		for i := range vs {
+			vs[i] = crlf(vs[i])
+		}
+	}
 	return values, names, computed
+}
+
+// unreproducible reports a control whose default a browser changes or adds to at
+// submit, in ways not reimplemented here.
+func unreproducible(n *html.Node, name string) bool {
+	if strings.ContainsAny(name, "\r\n") || strings.EqualFold(name, "_charset_") {
+		return true
+	}
+	if _, ok := attr(n, "dirname"); ok {
+		return true
+	}
+	if wrap, _ := attr(n, "wrap"); n.DataAtom == atom.Textarea && strings.EqualFold(wrap, "hard") {
+		return true
+	}
+	return false
+}
+
+// UTF8ContentType reports whether a Content-Type header leaves a form page
+// encoded as UTF-8: a browser encodes the form in the page's encoding, and
+// nothing here encodes any other.
+func UTF8ContentType(ct string) bool {
+	_, after, ok := strings.Cut(strings.ToLower(ct), "charset=")
+	if !ok {
+		return true
+	}
+	cs := strings.Trim(strings.TrimSpace(strings.SplitN(after, ";", 2)[0]), `"`)
+	return cs == "utf-8" || cs == "utf8"
+}
+
+// utf8Page reports whether a browser would encode this form as UTF-8. A page
+// that declares no encoding is taken as UTF-8.
+func utf8Page(doc, form *html.Node) bool {
+	isUTF8 := func(s string) bool {
+		return s == "" || strings.EqualFold(strings.TrimSpace(s), "utf-8") || strings.EqualFold(strings.TrimSpace(s), "utf8")
+	}
+	if cs, ok := attr(form, "accept-charset"); ok && !isUTF8(cs) {
+		return false
+	}
+	for _, m := range cascadia.QueryAll(doc, cascadia.MustCompile("meta")) {
+		if cs, ok := attr(m, "charset"); ok && !isUTF8(cs) {
+			return false
+		}
+		if h, _ := attr(m, "http-equiv"); strings.EqualFold(h, "content-type") {
+			c, _ := attr(m, "content")
+			if _, after, ok := strings.Cut(strings.ToLower(c), "charset="); ok && !isUTF8(after) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// asciiCollapse strips and collapses ASCII whitespace only, as a browser does for
+// an option's text: strings.Fields would also collapse a no-break space.
+func asciiCollapse(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\f' || r == '\r'
+	}), " ")
 }
 
 // exactDefault reports whether a browser sends an input's default exactly as the
@@ -637,7 +707,7 @@ func selectValue(n *html.Node, name string, values url.Values) {
 			values.Add(name, v)
 			return
 		}
-		values.Add(name, nodeText(o))
+		values.Add(name, asciiCollapse(rawText(o)))
 	}
 	selected := []*html.Node{}
 	for _, o := range opts {

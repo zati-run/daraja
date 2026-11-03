@@ -153,6 +153,8 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"last checked radio wins", wrap(`<input type="radio" name="mode" value="delete" checked><input type="radio" name="mode" value="save" checked>`, ""), "mode=save&title=new"},
 		{"last checked radio disabled sends nothing", wrap(`<input type="radio" name="mode" value="a" checked><input type="radio" name="mode" value="b" checked disabled>`, ""), "title=new"},
 		{"checked radio keeps its place before a later control", wrap(`<input type="radio" name="mode" value="save" checked><input type="hidden" name="mode" value="delete">`, ""), "mode=save&mode=delete&title=new"},
+		{"hidden newlines become CRLF", wrap("<input type=\"hidden\" name=\"h\" value=\"a&#10;b\">", ""), "h=a%0D%0Ab&title=new"},
+		{"option text keeps a no-break space", wrap("<select name=\"s\"><option>  A&nbsp;B\n C </option></select>", ""), "s=A%C2%A0B+C&title=new"},
 		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
 	}
 	for _, tc := range cases {
@@ -251,26 +253,64 @@ func TestUndeclaredControlABrowserRewritesIsDrift(t *testing.T) {
 
 func TestDefaultsABrowserMayChangeAreDrift(t *testing.T) {
 	v := Vars{Input: map[string]any{"title": "t"}}
+	name := func(control string) string {
+		if strings.Contains(control, "_charset_") {
+			return "_charset_"
+		}
+		return "n"
+	}
 	for _, control := range []string{
 		`<input type="number" name="n" value="1">`,
 		`<input type="email" name="n" value="a@b.test">`,
 		`<input type="url" name="n" value="http://a.test">`,
 		`<input type="unknown" name="n" value="x">`,
 		"<input name=\"n\" value=\"alice&#10;bob\">",
+		`<input type="hidden" name="_charset_">`,
+		`<input name="n" value="x" dirname="d">`,
+		`<textarea name="n" wrap="hard" cols="3">abcdef</textarea>`,
 		`<select name="n" size="01"><option value="a">A</option></select>`,
 	} {
 		page := []byte(`<form id="f" method="post" action="/notes"><input name="title">` + control + `</form>`)
 		if _, err := formOp(nil).FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
 			t.Errorf("undeclared %s: err = %v", control, err)
 		}
-		absent := formOp(func(o *Operation) { o.Request.Form["n"] = "{{input.absent}}" })
+		absent := formOp(func(o *Operation) { o.Request.Form[name(control)] = "{{input.absent}}" })
 		if _, err := absent.FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
 			t.Errorf("declared but absent %s: err = %v", control, err)
 		}
-		set := formOp(func(o *Operation) { o.Request.Form["n"] = "{{input.title}}" })
+		set := formOp(func(o *Operation) { o.Request.Form[name(control)] = "{{input.title}}" })
 		got, err := set.FormFields("http://a.test", page, v)
-		if err != nil || got.Get("n") != "t" {
+		if err != nil || got.Get(name(control)) != "t" {
 			t.Errorf("set %s: %v, %v", control, got, err)
+		}
+	}
+}
+
+func TestFormNotEncodedAsUTF8IsDrift(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "t"}}
+	for _, head := range []string{
+		`<meta charset="iso-8859-1">`,
+		`<meta http-equiv="Content-Type" content="text/html; charset=shift_jis">`,
+	} {
+		page := []byte(head + `<form id="f" method="post" action="/notes"><input name="title"></form>`)
+		if _, err := formOp(nil).FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
+			t.Errorf("%s: err = %v", head, err)
+		}
+	}
+	page := []byte(`<form id="f" method="post" action="/notes" accept-charset="iso-8859-1"><input name="title"></form>`)
+	if _, err := formOp(nil).FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("accept-charset: err = %v", err)
+	}
+	page = []byte(`<meta charset="UTF-8"><form id="f" method="post" action="/notes"><input name="title"></form>`)
+	if _, err := formOp(nil).FormFields("http://a.test", page, v); err != nil {
+		t.Errorf("utf-8: err = %v", err)
+	}
+}
+
+func TestUTF8ContentType(t *testing.T) {
+	for ct, want := range map[string]bool{"": true, "text/html": true, "text/html; charset=UTF-8": true, `text/html; charset="utf-8"; x=y`: true, "text/html; charset=iso-8859-1": false, "text/html; Charset=Shift_JIS": false} {
+		if got := UTF8ContentType(ct); got != want {
+			t.Errorf("UTF8ContentType(%q) = %v, want %v", ct, got, want)
 		}
 	}
 }
