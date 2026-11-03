@@ -156,6 +156,7 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"hidden newlines become CRLF", wrap("<input type=\"hidden\" name=\"h\" value=\"a&#10;b\">", ""), "h=a%0D%0Ab&title=new"},
 		{"option text keeps a no-break space", wrap("<select name=\"s\"><option>  A&nbsp;B\n C </option></select>", ""), "s=A%C2%A0B+C&title=new"},
 		{"radio in a datalist still unchecks its group", wrap(`<input type="radio" name="d" value="1" checked><datalist><input type="radio" name="d" value="0" checked></datalist>`, ""), "title=new"},
+		{"control in SVG isn't a control", wrap(`<svg><input type="hidden" name="delete" value="1"/></svg>`, ""), "title=new"},
 		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
 	}
 	for _, tc := range cases {
@@ -293,6 +294,9 @@ func TestFormNotEncodedAsUTF8IsDrift(t *testing.T) {
 	for _, head := range []string{
 		`<meta charset="iso-8859-1">`,
 		`<meta http-equiv="Content-Type" content="text/html; charset=shift_jis">`,
+		`<meta http-equiv="content-type" content="text/html; charset = windows-1252">`,
+		`<meta http-equiv="content-type" content="text/html; charset='windows-1252'">`,
+		`<meta http-equiv="content-type" content="text/html; charset">`,
 	} {
 		page := []byte(head + `<form id="f" method="post" action="/notes"><input name="title"></form>`)
 		if _, err := formOp(nil).FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
@@ -314,6 +318,15 @@ func TestUTF8ContentType(t *testing.T) {
 		if got := UTF8ContentType(ct); got != want {
 			t.Errorf("UTF8ContentType(%q) = %v, want %v", ct, got, want)
 		}
+	}
+}
+
+func TestEmptyFormReferenceOwnsNothing(t *testing.T) {
+	page := []byte(`<form id="" method="post" action="/notes"><input name="title"><input form="" type="hidden" name="delete" value="1"></form>`)
+	o := formOp(func(o *Operation) { o.Request.FormPage.Selector = "form" })
+	got, err := o.FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "t"}})
+	if err != nil || got.Has("delete") {
+		t.Errorf("fields = %v, err = %v", got, err)
 	}
 }
 

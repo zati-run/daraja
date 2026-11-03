@@ -321,7 +321,7 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 		return nil, fmt.Errorf("%w: the form page does not parse", ErrSourceChanged)
 	}
 	forms := cascadia.QueryAll(doc, sel)
-	if len(forms) != 1 || forms[0].DataAtom != atom.Form {
+	if len(forms) != 1 || forms[0].DataAtom != atom.Form || forms[0].Namespace != "" {
 		return nil, fmt.Errorf("%w: %q matches %d elements, want one form", ErrSourceChanged, fp.Selector, len(forms))
 	}
 	form := forms[0]
@@ -442,10 +442,10 @@ func formAction(origin, pagePath string, doc, form *html.Node) (string, bool) {
 func ownedBy(n, form *html.Node) bool {
 	if id, ok := attr(n, "form"); ok {
 		own, has := attr(form, "id")
-		return has && own == id
+		return has && id != "" && own == id
 	}
 	for p := n.Parent; p != nil; p = p.Parent {
-		if p.DataAtom == atom.Form {
+		if p.DataAtom == atom.Form && p.Namespace == "" {
 			return p == form
 		}
 	}
@@ -510,7 +510,8 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 				return // never submitted
 			}
 			name, named := attr(n, "name")
-			named = named && name != "" && ownedBy(n, form) && !controlDisabled(n)
+			// An element in SVG or MathML with a control's name isn't a control.
+			named = named && name != "" && n.Namespace == "" && ownedBy(n, form) && !controlDisabled(n)
 			if named && unreproducible(n, name) {
 				computed[name] = true
 			}
@@ -620,6 +621,8 @@ func UTF8ContentType(ct string) bool {
 	return !ok || strings.EqualFold(cs, "utf-8") || strings.EqualFold(cs, "utf8")
 }
 
+var metaCharset = regexp.MustCompile(`(?i)charset\s*=\s*["']?([^\s;"']+)`)
+
 // utf8Page reports whether a browser would encode this form as UTF-8. A page
 // that declares no encoding is taken as UTF-8.
 func utf8Page(doc, form *html.Node) bool {
@@ -635,8 +638,12 @@ func utf8Page(doc, form *html.Node) bool {
 		}
 		if h, _ := attr(m, "http-equiv"); strings.EqualFold(h, "content-type") {
 			c, _ := attr(m, "content")
-			if _, after, ok := strings.Cut(strings.ToLower(c), "charset="); ok && !isUTF8(after) {
-				return false
+			if strings.Contains(strings.ToLower(c), "charset") {
+				// A browser allows spaces and quotes here. Anything unreadable fails closed.
+				got := metaCharset.FindStringSubmatch(c)
+				if got == nil || !isUTF8(got[1]) {
+					return false
+				}
 			}
 		}
 	}
@@ -684,7 +691,7 @@ func submitOverride(n *html.Node, typ string) bool {
 
 // checkedRadio returns the group of a radio button marked checked.
 func checkedRadio(n *html.Node) (string, bool) {
-	if n.DataAtom != atom.Input {
+	if n.DataAtom != atom.Input || n.Namespace != "" {
 		return "", false
 	}
 	t, _ := attr(n, "type")
