@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -187,8 +188,13 @@ func run() error {
 		})
 	})
 	srv := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// Bind first, so that "serving" is true when it's logged.
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
+	go func() { errc <- srv.Serve(ln) }()
 	log.Info("serving", "addr", *listen, "ready_ms", time.Since(start).Milliseconds())
 	select {
 	case err := <-errc:
