@@ -433,6 +433,8 @@ func (r *Runtime) write(ctx context.Context, p *Principal, in *integration.Compi
 		rec.HTTPStatus = x.status
 		a := x.answer()
 		switch {
+		case x.redirect && op.RedirectSucceeded(in.Source.Origin, a) && op.Refused(x.body):
+			rec.State, rec.Code, rec.Detail = journal.Uncertain, CodeOutcomeUncertain, "the source answered with both a success redirect and a declared failure; the effect may have been applied"
 		case x.redirect && op.RedirectSucceeded(in.Source.Origin, a) && identifier(in, op, a, vars) != "":
 			rec.State = journal.Succeeded
 			rec.Identifier = identifier(in, op, a, vars)
@@ -775,10 +777,6 @@ func (r *Runtime) formFields(ctx context.Context, in *integration.Compiled, op *
 	if err != nil {
 		return nil, errf(CodeInvalidInput, "form page: %v", err)
 	}
-	target, err := vars.RenderString(op.Request.Path, url.PathEscape)
-	if err != nil {
-		return nil, errf(CodeInvalidInput, "form action: %v", err)
-	}
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, in.Source.Origin+path, nil)
@@ -811,7 +809,7 @@ func (r *Runtime) formFields(ctx context.Context, in *integration.Compiled, op *
 	case resp.StatusCode != http.StatusOK:
 		return nil, errf(CodeSourceChanged, "the form page answered %d", resp.StatusCode)
 	}
-	fields, err := op.FormFields(in.Source.Origin, body, target, vars)
+	fields, err := op.FormFields(in.Source.Origin, body, vars)
 	if errors.Is(err, integration.ErrSourceChanged) {
 		return nil, errf(CodeSourceChanged, "%v", err)
 	}

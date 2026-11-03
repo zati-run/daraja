@@ -53,7 +53,7 @@ func formOp(mut func(*Operation)) *Operation {
 
 func TestFormFieldsSubmitsWhatABrowserWould(t *testing.T) {
 	o := formOp(func(o *Operation) { o.Request.Form["body"] = "{{input.absent}}" })
-	got, err := o.FormFields("http://a.test", []byte(formPage), "/notes", Vars{Input: map[string]any{"title": "new"}})
+	got, err := o.FormFields("http://a.test", []byte(formPage), Vars{Input: map[string]any{"title": "new"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestFormFieldsRefusesDrift(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := formOp(tc.mut).FormFields("http://a.test", []byte(tc.page), "/notes", v)
+			_, err := formOp(tc.mut).FormFields("http://a.test", []byte(tc.page), v)
 			if !errors.Is(err, ErrSourceChanged) {
 				t.Errorf("err = %v, want ErrSourceChanged", err)
 			}
@@ -95,7 +95,7 @@ func TestFormFieldsLeakNoPageValues(t *testing.T) {
 		strings.Replace(formPage, `method="POST"`, `method="POST" enctype="secret-value"`, 1),
 		strings.Replace(formPage, `method="POST"`, `method="secret-value"`, 1),
 	} {
-		_, err := formOp(nil).FormFields("http://a.test", []byte(page), "/notes", v)
+		_, err := formOp(nil).FormFields("http://a.test", []byte(page), v)
 		if !errors.Is(err, ErrSourceChanged) || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "SECRET") {
 			t.Errorf("err = %v", err)
 		}
@@ -118,8 +118,8 @@ func TestFormActionResolvesAgainstThePage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			o := formOp(func(o *Operation) { o.Request.FormPage.Path = tc.formPath })
-			_, err := o.FormFields("http://a.test", page(tc.html), tc.target, v)
+			o := formOp(func(o *Operation) { o.Request.FormPage.Path, o.Request.Path = tc.formPath, tc.target })
+			_, err := o.FormFields("http://a.test", page(tc.html), v)
 			if tc.ok && err != nil {
 				t.Errorf("err = %v", err)
 			}
@@ -146,14 +146,16 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"control inside, owned by another form", wrap(`<input name="other" value="o" form="g">`, ""), "title=new"},
 		{"datalist is never submitted", wrap(`<datalist><input name="d" value="1"></datalist>`, ""), "title=new"},
 		{"disabled option is skipped", wrap(`<select name="s"><option value="a" disabled>A</option><option value="b">B</option></select>`, ""), "s=b&title=new"},
-		{"disabled optgroup is skipped", wrap(`<select name="s"><optgroup disabled><option value="a" selected>A</option></optgroup><option value="b">B</option></select>`, ""), "s=b&title=new"},
+		{"selected in a disabled optgroup sends nothing", wrap(`<select name="s"><optgroup disabled><option value="a" selected>A</option></optgroup><option value="b">B</option></select>`, ""), "title=new"},
+		{"selected and disabled sends nothing", wrap(`<select name="s"><option value="a" disabled selected>A</option><option value="b">B</option></select>`, ""), "title=new"},
+		{"first enabled option is the default", wrap(`<select name="s"><optgroup disabled><option value="a">A</option></optgroup><option value="b">B</option></select>`, ""), "s=b&title=new"},
 		{"single select keeps the last selected", wrap(`<select name="s"><option value="a" selected>A</option><option value="b" selected>B</option></select>`, ""), "s=b&title=new"},
 		{"list box with nothing selected sends nothing", wrap(`<select name="s" size="3"><option value="a">A</option></select>`, ""), "title=new"},
 		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := formOp(nil).FormFields("http://a.test", tc.page, "/notes", v)
+			got, err := formOp(nil).FormFields("http://a.test", tc.page, v)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -164,8 +166,82 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 	}
 	// A declared field that's disabled can't be submitted by a person either.
 	disabled := []byte(`<form id="f" method="post" action="/notes"><fieldset disabled><input name="title"></fieldset></form>`)
-	if _, err := formOp(nil).FormFields("http://a.test", disabled, "/notes", v); !errors.Is(err, ErrSourceChanged) {
+	if _, err := formOp(nil).FormFields("http://a.test", disabled, v); !errors.Is(err, ErrSourceChanged) {
 		t.Errorf("declared disabled field: err = %v, want ErrSourceChanged", err)
+	}
+}
+
+func TestParseRefusesFormOperationsThatCantWork(t *testing.T) {
+	read := func(m map[string]any, f func(op, resp map[string]any)) {
+		for _, o := range m["operations"].([]any) {
+			op := o.(map[string]any)
+			if op["effect"] == "read" {
+				f(op, op["response"].(map[string]any))
+				return
+			}
+		}
+	}
+	write := func(m map[string]any, f func(op, resp map[string]any)) {
+		for _, o := range m["operations"].([]any) {
+			op := o.(map[string]any)
+			if op["effect"] == "write" {
+				f(op, op["response"].(map[string]any))
+				return
+			}
+		}
+	}
+	cases := []struct {
+		name, want string
+		mut        func(map[string]any)
+	}{
+		{"read with a location_regex", "location_regex reads a redirect", func(m map[string]any) {
+			read(m, func(_, r map[string]any) {
+				r["extract"] = map[string]any{"id": map[string]any{"location_regex": "^/notes/([0-9]+)$"}}
+			})
+		}},
+		{"redirect in success_status", "not success_status", func(m map[string]any) {
+			write(m, func(_, r map[string]any) { r["success_status"] = []any{200, 302} })
+		}},
+		{"write with no form page", "needs request.form_page", func(m map[string]any) {
+			write(m, func(op, _ map[string]any) { delete(op["request"].(map[string]any), "form_page") })
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(mutateFile(t, "testdata/notes-form.json", tc.mut))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormActionComparesTheQuerySent(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "new"}}
+	page := func(action string) []byte {
+		return []byte(`<form id="f" method="post" action="` + action + `"><input name="title"></form>`)
+	}
+	withQuery := func(o *Operation) { o.Request.Query = map[string]string{"mode": "delete"} }
+	if _, err := formOp(withQuery).FormFields("http://a.test", page("/notes"), v); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("a query the form doesn't post to: err = %v", err)
+	}
+	if _, err := formOp(withQuery).FormFields("http://a.test", page("/notes?mode=delete"), v); err != nil {
+		t.Errorf("the query the form posts to: err = %v", err)
+	}
+	if _, err := formOp(nil).FormFields("http://a.test", page("/notes?mode=delete"), v); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("a form action with a query the artifact doesn't send: err = %v", err)
+	}
+}
+
+func TestRelativeRedirectIsNotRead(t *testing.T) {
+	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/[0-9]+$", Extract: map[string]Extract{"id": {LocationRegex: "^/notes/([0-9]+)$"}}}}
+	for loc, want := range map[string]bool{"notes/7": false, "./notes/7": false, "/notes/7": true, "http://a.test/notes/7": true, "//evil.test/notes/7": false} {
+		if got := o.RedirectSucceeded("http://a.test", Answer{Location: loc}); got != want {
+			t.Errorf("RedirectSucceeded(%s) = %v, want %v", loc, got, want)
+		}
+		if _, got := o.ExtractValues("http://a.test", Answer{Location: loc}, Vars{})["id"]; got != want {
+			t.Errorf("ExtractValues(%s) found = %v, want %v", loc, got, want)
+		}
 	}
 }
 

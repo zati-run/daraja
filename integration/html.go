@@ -125,12 +125,23 @@ func LocalLocation(origin, loc string) (string, bool) {
 	return u.RequestURI(), true
 }
 
+// redirectPath is the local path and query of a Location header. A location
+// relative to the request's own path can't be resolved from the origin alone, so
+// it isn't read: /auth/submit redirecting to notes/7 goes to /auth/notes/7, not
+// /notes/7.
+func redirectPath(origin, loc string) (string, bool) {
+	if u, err := url.Parse(loc); err != nil || (!u.IsAbs() && !strings.HasPrefix(loc, "/")) {
+		return "", false
+	}
+	return LocalLocation(origin, loc)
+}
+
 // RedirectSucceeded reports whether a redirect is the declared success shape.
 func (o *Operation) RedirectSucceeded(origin string, a Answer) bool {
 	if o.Response.RedirectSuccess == "" {
 		return false
 	}
-	p, ok := LocalLocation(origin, a.Location)
+	p, ok := redirectPath(origin, a.Location)
 	if !ok {
 		return false
 	}
@@ -159,7 +170,7 @@ func (o *Operation) ExtractValues(origin string, a Answer, v Vars) map[string]st
 				out[name] = s
 			}
 		case e.LocationRegex != "":
-			p, ok := LocalLocation(origin, a.Location)
+			p, ok := redirectPath(origin, a.Location)
 			if !ok {
 				continue
 			}
@@ -289,7 +300,7 @@ func (o *Operation) TypedOutput(values map[string]string) map[string]any {
 // artifact's declared fields set over them. It fails with ErrSourceChanged
 // when the page no longer has that form, or the form no longer posts where
 // and how the artifact says, or lacks a declared field.
-func (o *Operation) FormFields(origin string, page []byte, target string, v Vars) (url.Values, error) {
+func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, error) {
 	fp := o.Request.FormPage
 	sel, err := cascadia.ParseGroup(fp.Selector)
 	if err != nil {
@@ -319,9 +330,13 @@ func (o *Operation) FormFields(origin string, page []byte, target string, v Vars
 	if err != nil {
 		return nil, err
 	}
-	targetPath, ok1 := LocalLocation(origin, target)
-	actionPath, ok2 := formAction(origin, pagePath, doc, form)
-	if !ok1 || !ok2 || targetPath != actionPath {
+	// The target is what will really be sent, with its query.
+	req, err := o.Build(origin, v, url.Values{})
+	if err != nil {
+		return nil, err
+	}
+	actionPath, ok := formAction(origin, pagePath, doc, form)
+	if !ok || !sameTarget(req.URL.RequestURI(), actionPath) {
 		return nil, fmt.Errorf("%w: the form's action changed", ErrSourceChanged)
 	}
 	values, names := formValues(doc, form)
@@ -339,6 +354,13 @@ func (o *Operation) FormFields(origin string, page []byte, target string, v Vars
 		values.Set(k, s)
 	}
 	return values, nil
+}
+
+// sameTarget compares two paths with their queries, in any query order.
+func sameTarget(a, b string) bool {
+	ua, err1 := url.ParseRequestURI(a)
+	ub, err2 := url.ParseRequestURI(b)
+	return err1 == nil && err2 == nil && ua.EscapedPath() == ub.EscapedPath() && ua.Query().Encode() == ub.Query().Encode()
 }
 
 // formAction returns the path and query the form posts to, resolved as a browser
@@ -476,25 +498,30 @@ func rawText(n *html.Node) string {
 	return b.String()
 }
 
+// selectValue adds what a browser submits for a select. A selected option that's
+// disabled stays selected but isn't submitted, so it sends nothing, and the first
+// enabled option doesn't replace it.
 func selectValue(n *html.Node, name string, values url.Values) {
 	opts := []*html.Node{}
 	var walk func(*html.Node)
 	walk = func(c *html.Node) {
 		if c.Type == html.ElementNode && c.DataAtom == atom.Option {
-			if _, off := attr(c, "disabled"); !off && !optgroupDisabled(c) {
-				opts = append(opts, c)
-			}
+			opts = append(opts, c)
 		}
 		for k := c.FirstChild; k != nil; k = k.NextSibling {
 			walk(k)
 		}
 	}
 	walk(n)
-	optVal := func(o *html.Node) string {
-		if v, ok := attr(o, "value"); ok {
-			return v
+	add := func(o *html.Node) {
+		if _, off := attr(o, "disabled"); off || optgroupDisabled(o) {
+			return
 		}
-		return nodeText(o)
+		if v, ok := attr(o, "value"); ok {
+			values.Add(name, v)
+			return
+		}
+		values.Add(name, nodeText(o))
 	}
 	selected := []*html.Node{}
 	for _, o := range opts {
@@ -506,14 +533,21 @@ func selectValue(n *html.Node, name string, values url.Values) {
 	switch {
 	case multi:
 		for _, o := range selected {
-			values.Add(name, optVal(o))
+			add(o)
 		}
 	case len(selected) > 0: // a single select keeps the last one marked
-		values.Add(name, optVal(selected[len(selected)-1]))
-	case len(opts) > 0:
-		// A drop-down shows its first option; a list box shows none selected.
-		if size, _ := attr(n, "size"); size == "" || size == "0" || size == "1" {
-			values.Add(name, optVal(opts[0]))
+		add(selected[len(selected)-1])
+	default:
+		// A drop-down shows its first enabled option; a list box shows none.
+		if size, _ := attr(n, "size"); size != "" && size != "0" && size != "1" {
+			return
+		}
+		for _, o := range opts {
+			_, off := attr(o, "disabled")
+			if !off && !optgroupDisabled(o) {
+				add(o)
+				return
+			}
 		}
 	}
 }
