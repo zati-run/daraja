@@ -58,7 +58,8 @@ These are **[Proposal]** changes the owner hasn't separately decided:
   declares no identifier, a success status records `succeeded`, so such a write
   can't detect a failure nobody declared. If it declares an output or
   `refused_when`, a body that doesn't decode stays `uncertain`. A reconcile read
-  must map an output, and a read's body must be one JSON value.
+  must map an output. A read that declares an output or `refused_when` must
+  answer with exactly one JSON value; a read that declares neither isn't parsed.
 - **Known gaps, not addressed here.** A reconcile read can take an undeclared
   error sent with a success status for absence (issue #5). Go's transport can
   resend a GET write on a reused connection (issue #6).
