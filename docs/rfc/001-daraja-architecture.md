@@ -55,8 +55,8 @@ hasn't separately decided, and the details below replace the sketch in
   whole pattern), or a JSON Pointer. A text anchor can use `{{input.x}}`, so
   a reconcile read can find a marker in an HTML list.
 - **Writes** must use POST, declare `request.form_page` and fetch it first. The submitted
-  values are the form's own, including its CSRF token, with `request.form` set
-  over them. They follow the common rules a browser applies: form ownership,
+  values are the form's own, in page order, including its CSRF token, with
+  `request.form` set over them. They follow the common rules a browser applies: form ownership,
   disabled fieldsets and options, drop-down defaults, radio groups and textarea
   newlines. Daraja doesn't reimplement how browsers sanitize values. A default
   it can't reproduce exactly is drift unless the artifact sets that field: for
@@ -68,7 +68,8 @@ hasn't separately decided, and the details below replace the sketch in
   A page that changes values with script at submit isn't covered. Declaring a
   name that a button with its own `formaction` or similar also uses is drift.
   The action must match the
-  path and query that will be sent. A page over 8 MiB is drift, because a cut-off
+  path and query that will be sent, and a URL a browser and Go read differently,
+  with a backslash, a space or `%2e`, is drift. A page over 8 MiB is drift, because a cut-off
   page could lose a field.
 - **Drift is checked before sending.** The selector must match exactly one
   form, and its method, action and encoding must match the artifact, and every

@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"slices"
 	"sync"
 	"time"
@@ -273,7 +272,7 @@ func sessionHeaders(in *integration.Compiled, values, headers map[string]string)
 // formFields fetches the operation's form page, if it has one, and reads the
 // values to submit. Every failure here is before the submission, so nothing
 // with an effect was sent.
-func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.Compiled, op *integration.CompiledOp, vars integration.Vars, session map[string]string) (url.Values, Outcome, bool) {
+func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.Compiled, op *integration.CompiledOp, vars integration.Vars, session map[string]string) (integration.Fields, Outcome, bool) {
 	if op.Request.FormPage == nil {
 		return nil, Outcome{}, true
 	}

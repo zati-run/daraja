@@ -112,10 +112,19 @@ func compileLocationRegex(s string) (*regexp.Regexp, error) {
 	return regexp.Compile("^(?:" + s[1:len(s)-1] + ")$")
 }
 
+// plainURL reports whether a browser and Go's parser read a URL the same way. A
+// browser reads a backslash as a slash, drops tabs, newlines and surrounding
+// spaces, and treats %2e as a dot segment, so /\\evil.test leaves the origin and
+// /notes/%2e%2e is the root, and neither looks so to Go.
+func plainURL(s string) bool {
+	return !strings.ContainsFunc(s, func(r rune) bool { return r == '\\' || r <= ' ' || r == 0x7f }) &&
+		!strings.Contains(strings.ToLower(s), "%2e") && !strings.Contains(strings.ToLower(s), "%5c")
+}
+
 // LocalLocation resolves a location against the origin and returns its path
 // and query. ok is false when it leaves the origin.
 func LocalLocation(origin, loc string) (string, bool) {
-	if loc == "" {
+	if loc == "" || !plainURL(loc) {
 		return "", false
 	}
 	base, err := url.Parse(origin + "/")
@@ -142,11 +151,6 @@ func (a Answer) isRedirect() bool {
 // it isn't read: /auth/submit redirecting to notes/7 goes to /auth/notes/7, not
 // /notes/7.
 func redirectPath(origin, loc string) (string, bool) {
-	// A browser reads a backslash as a slash and drops tabs, newlines and
-	// surrounding spaces, so /\\evil.test leaves the origin. Go's parser doesn't.
-	if strings.ContainsFunc(loc, func(r rune) bool { return r == '\\' || r <= ' ' || r == 0x7f }) {
-		return "", false
-	}
 	if u, err := url.Parse(loc); err != nil || (!u.IsAbs() && !strings.HasPrefix(loc, "/")) {
 		return "", false
 	}
@@ -317,12 +321,79 @@ func (o *Operation) TypedOutput(values map[string]string) map[string]any {
 	return out
 }
 
+// Field is one submitted name and value.
+type Field struct{ Name, Value string }
+
+// Fields is a form's submission, in page order. A source can pair values by their
+// order, as in items[][id] followed by items[][qty], so url.Values, which groups by
+// name, wouldn't do.
+type Fields []Field
+
+// Add appends a value.
+func (f *Fields) Add(name, value string) { *f = append(*f, Field{name, value}) }
+
+// Set puts a value at the name's first place and removes any others, or appends it
+// if the name isn't there.
+func (f *Fields) Set(name, value string) {
+	out, done := (*f)[:0:0], false
+	for _, e := range *f {
+		switch {
+		case e.Name != name:
+			out = append(out, e)
+		case !done:
+			out, done = append(out, Field{name, value}), true
+		}
+	}
+	if !done {
+		out = append(out, Field{name, value})
+	}
+	*f = out
+}
+
+// Get returns the name's first value, or "".
+func (f Fields) Get(name string) string {
+	for _, e := range f {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}
+
+// Has reports whether the name is present.
+func (f Fields) Has(name string) bool {
+	for _, e := range f {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Values returns the fields grouped by name.
+func (f Fields) Values() url.Values {
+	v := url.Values{}
+	for _, e := range f {
+		v.Add(e.Name, e.Value)
+	}
+	return v
+}
+
+// Encode returns the fields as a form body, in order.
+func (f Fields) Encode() string {
+	parts := make([]string, len(f))
+	for i, e := range f {
+		parts[i] = url.QueryEscape(e.Name) + "=" + url.QueryEscape(e.Value)
+	}
+	return strings.Join(parts, "&")
+}
+
 // FormFields reads the reviewed form from its page and returns the values to
 // submit: the form's own fields (a CSRF token, for example), with the
 // artifact's declared fields set over them. It fails with ErrSourceChanged
 // when the page no longer has that form, or the form no longer posts where
 // and how the artifact says, or lacks a declared field.
-func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, error) {
+func (o *Operation) FormFields(origin string, page []byte, v Vars) (Fields, error) {
 	fp := o.Request.FormPage
 	sel, err := cascadia.ParseGroup(fp.Selector)
 	if err != nil {
@@ -364,7 +435,7 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 		return nil, err
 	}
 	// The target is what will really be sent, with its query.
-	req, err := o.Build(origin, v, url.Values{})
+	req, err := o.Build(origin, v, Fields{})
 	if err != nil {
 		return nil, err
 	}
@@ -462,6 +533,9 @@ func formAction(origin, pagePath string, doc, form *html.Node) (string, bool) {
 	if sel, err := cascadia.Parse("base[href]"); err == nil {
 		if n := cascadia.Query(doc, sel); n != nil {
 			href, _ := attr(n, "href")
+			if !plainURL(href) {
+				return "", false
+			}
 			if base, err = page.Parse(href); err != nil {
 				return "", false
 			}
@@ -470,6 +544,9 @@ func formAction(origin, pagePath string, doc, form *html.Node) (string, bool) {
 	action, _ := attr(form, "action")
 	u := page // an empty action posts to the page itself, whatever the base says
 	if action != "" {
+		if !plainURL(action) {
+			return "", false
+		}
 		if u, err = base.Parse(action); err != nil {
 			return "", false
 		}
@@ -522,8 +599,8 @@ func controlDisabled(n *html.Node) bool {
 // every enabled named control. Buttons are named controls but send no value unless
 // the artifact declares them. A disabled control isn't named, so declaring one
 // counts as drift.
-func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[string]bool) {
-	values, names := url.Values{}, map[string]atom.Atom{}
+func formValues(doc, form *html.Node) (Fields, map[string]atom.Atom, map[string]bool) {
+	values, names := Fields{}, map[string]atom.Atom{}
 	computed, overridden := map[string]bool{}, map[string]bool{}
 	// A later checked radio unchecks an earlier one in its group.
 	radios := map[string]*html.Node{}
@@ -596,7 +673,7 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 				if _, sized := attr(n, "size"); sized {
 					computed[name] = true // a list box may have no default
 				}
-				selectValue(n, name, values)
+				selectValue(n, name, &values)
 				return
 			case n.DataAtom == atom.Button:
 				t, ok := attr(n, "type")
@@ -619,10 +696,8 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 		delete(names, name)
 	}
 	// A browser converts newlines in every value it submits.
-	for _, vs := range values {
-		for i := range vs {
-			vs[i] = crlf(vs[i])
-		}
+	for i := range values {
+		values[i].Value = crlf(values[i].Value)
 	}
 	return values, names, computed
 }
@@ -755,7 +830,7 @@ func rawText(n *html.Node) string {
 // selectValue adds what a browser submits for a select. A selected option that's
 // disabled stays selected but isn't submitted, so it sends nothing, and the first
 // enabled option doesn't replace it.
-func selectValue(n *html.Node, name string, values url.Values) {
+func selectValue(n *html.Node, name string, values *Fields) {
 	opts := []*html.Node{}
 	var walk func(*html.Node)
 	walk = func(c *html.Node) {
@@ -813,7 +888,7 @@ func optgroupDisabled(o *html.Node) bool {
 
 // Build renders the operation's request. For a form submission, fields holds
 // the values FormFields returned, and replaces request.form.
-func (o *Operation) Build(origin string, v Vars, fields url.Values) (*http.Request, error) {
+func (o *Operation) Build(origin string, v Vars, fields Fields) (*http.Request, error) {
 	spec := o.Request
 	if fields != nil {
 		spec.Form = nil
