@@ -36,8 +36,13 @@ type socketGuard struct {
 	armed    int                       // workers started with sockets removed
 	held     map[target.SessionID]bool // targets kept paused, until they are gone
 	heldEver int                       // how many targets were ever kept paused
-	running  int                       // targets already running when attached
-	attached []context.CancelFunc
+	gone     map[target.SessionID]bool // detached before their attach event was handled
+	// heldWorker reports a held service worker. Stopping one doesn't last: the
+	// browser restarts it to finish installing, so only closing the browser
+	// keeps it from running without the guards.
+	heldWorker bool
+	running    int // targets already running when attached
+	attached   []context.CancelFunc
 }
 
 var autoAttachPaused = target.SetAutoAttachParams{AutoAttach: true, WaitForDebuggerOnStart: true, Flatten: ptrBool(true)}
@@ -45,7 +50,7 @@ var autoAttachPaused = target.SetAutoAttachParams{AutoAttach: true, WaitForDebug
 func ptrBool(b bool) *bool { return &b }
 
 func newSocketGuard(root, life context.Context, wg *sync.WaitGroup) *socketGuard {
-	return &socketGuard{root: root, life: life, wg: wg, held: map[target.SessionID]bool{}}
+	return &socketGuard{root: root, life: life, wg: wg, held: map[target.SessionID]bool{}, gone: map[target.SessionID]bool{}}
 }
 
 // armTab arms a tab (or a worker) session: its related targets start
@@ -79,9 +84,7 @@ func (g *socketGuard) armTab(ctx context.Context) error {
 			if err != nil {
 				return
 			}
-			g.mu.Lock()
-			delete(g.held, ev.SessionID)
-			g.mu.Unlock()
+			g.detached(ev.SessionID)
 		}
 	}()
 	return nil
@@ -117,6 +120,11 @@ func (g *socketGuard) handle(ev target.EventAttachedToTarget) {
 			}
 		}()
 	default: // a cross-site frame or a service worker cannot be attached while paused
+		if ev.TargetInfo.Type == "service_worker" {
+			g.mu.Lock()
+			g.heldWorker = true
+			g.mu.Unlock()
+		}
 		g.hold(ev.SessionID)
 	}
 }
@@ -150,9 +158,20 @@ func (g *socketGuard) armWorker(id target.ID) bool {
 
 func (g *socketGuard) hold(s target.SessionID) {
 	g.mu.Lock()
-	g.held[s] = true
+	defer g.mu.Unlock()
 	g.heldEver++
-	g.mu.Unlock()
+	if !g.gone[s] {
+		g.held[s] = true
+	}
+}
+
+// detached records a target going away. Attach and detach events have separate
+// consumers, so a detach can be handled first.
+func (g *socketGuard) detached(s target.SessionID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.held, s)
+	g.gone[s] = true
 }
 
 // waitHeldGone waits for the targets still held to go away, which the pages
@@ -176,8 +195,7 @@ func (g *socketGuard) waitHeldGone(ctx context.Context, d time.Duration) int {
 	}
 }
 
-// disarm, after the walk has stopped every page and every held target has
-// gone, stops pausing new targets and detaches from workers.
+// disarm, after stopPages has stopped everything, stops pausing new targets and detaches from workers.
 func (g *socketGuard) disarm(tab context.Context) {
 	// Turning auto-attach off would release any target still held under the
 	// main tab, which is why the caller makes sure there are none. Then

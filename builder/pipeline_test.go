@@ -350,7 +350,7 @@ func TestReadOnlyWalkBlocksEveryWriteVector(t *testing.T) {
 		}
 		return app.Creates(), rep
 	}
-	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "wsworker", "wsnested", "wsshared", "wsframe", "ping", "sw", "latewrite", "latepopup"} {
+	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "wsworker", "wsnested", "wsshared", "wsframe", "ping", "sw", "latewrite", "latepopup", "latechurn"} {
 		t.Run(vector, func(t *testing.T) {
 			// Control: with writes allowed, the vector really writes.
 			if n, _ := run(t, vector, []string{"read", "write"}); n == 0 {
