@@ -27,7 +27,7 @@ const refusedArtifact = `{
      "input_schema": {"type": "object"}, "output_schema": {"type": "object"},
      "request": {"method": "POST", "path": "/gql", "body": {"query": "mutation { a }", "ref": "{{receipt.marker}}"}},
      "response": {"success_status": [200], "output": {"id": "/data/a/id"}, "identifier": "/data/a/id",
-       "refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}, {"json_pointer": "/data/ok", "equals": "false"}]},
+       "refused_when": [{"json_pointer": "/data/a/__typename", "equals": "Failure"}, {"json_pointer": "/data/ok", "equals": "false"}, {"json_pointer": "/errors/0/detail", "contains": "NOT_FOUND"}]},
      "reconcile": {"strategy": "marker", "operation": "lookup", "found": "/id", "settle_seconds": 3600}}
   ]}`
 
@@ -62,6 +62,8 @@ func TestWriteClassifiesDeclaredFailures(t *testing.T) {
 	}{
 		{"declared failure", `{"data":{"a":{"__typename":"Failure"}}}`, journal.Failed, CodeSourceRefused},
 		{"second declared failure, non-string scalar", `{"data":{"ok":false}}`, journal.Failed, CodeSourceRefused},
+		{"failure code nested in error text", `{"errors":[{"detail":"{\"code\":\"NOT_FOUND\"}"}],"data":null}`, journal.Failed, CodeSourceRefused},
+		{"other error text stays uncertain", `{"errors":[{"detail":"INTERNAL_SERVER_ERROR"}],"data":null}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"failure and identifier contradict", `{"data":{"a":{"__typename":"Failure","id":7}}}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"undeclared failure stays uncertain", `{"data":{"a":{"__typename":"OtherFailure"}}}`, journal.Uncertain, CodeOutcomeUncertain},
 		{"not JSON stays uncertain", `<html>sign in</html>`, journal.Uncertain, CodeOutcomeUncertain},
@@ -105,7 +107,7 @@ func TestReadRefusesDeclaredFailure(t *testing.T) {
 
 func TestParseRefusesBadRefusal(t *testing.T) {
 	t.Parallel()
-	for _, bad := range []string{`{"json_pointer":"","equals":"x"}`, `{"json_pointer":"no-slash","equals":"x"}`, `{"json_pointer":"/a","equals":""}`} {
+	for _, bad := range []string{`{"json_pointer":"","equals":"x"}`, `{"json_pointer":"no-slash","equals":"x"}`, `{"json_pointer":"/a"}`, `{"json_pointer":"/a","equals":"x","contains":"y"}`} {
 		art := strings.Replace(refusedArtifact, "ORIGIN", "http://127.0.0.1:1", 1)
 		art = strings.Replace(art, `{"json_pointer": "/data/a/__typename", "equals": "Failure"}`, bad, 1)
 		if _, err := integration.Parse([]byte(art)); err == nil || !strings.Contains(err.Error(), "refused_when") {

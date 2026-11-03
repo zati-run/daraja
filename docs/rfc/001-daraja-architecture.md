@@ -1,6 +1,6 @@
 # RFC 001: Daraja architecture
 
-- **Status:** Draft, revision 4 (owner answers to the blocking questions folded in). Not accepted.
+- **Status:** Draft, revision 7. Not accepted.
 - **Date:** 2026-10-31
 - **Owner:** David Ndungu
 - **Repository:** `github.com/zati-run/daraja`
@@ -42,6 +42,29 @@ The owner answered the questions that blocked acceptance on 2026-10-31:
 As a consequence, this revision moves `http.form_html` and `browser.steps`
 from phase 1a to phase 2 (a **[Proposal]**). They stay in the artifact format
 and on the ladder, but v1 doesn't implement them. See [Phased scope](#phased-scope).
+
+### Revision 7 changes (A14 follow-ups)
+
+These are **[Proposal]** changes the owner hasn't separately decided:
+
+- **Declared failures.** `response.refused_when` lists answers that are
+  definite failures despite a success status. Each entry has a `json_pointer`
+  and exactly one of `equals` and `contains`. A matching write is `failed` at
+  once, and a matching read returns `source_refused`. An answer that matches and
+  also carries the declared identifier contradicts itself, so the write stays
+  `uncertain`. An undeclared failure stays `uncertain`, as before.
+- **Revision 6's example was wrong for this case.** A note to a missing ticket
+  doesn't answer `CreateOrUpdateTicketFailure`. It answers HTTP 200 with `data`
+  null and a generic `INTERNAL_SERVER_ERROR`, and the `RESOURCE_NOT_FOUND` code
+  is inside `/errors/0/extensions/response/body`, which is why `contains`
+  exists. The generic code alone isn't a declared failure, because a server
+  error doesn't show that the write wasn't applied.
+- **Client version.** No code change. The pinned `apollographql-client-version`
+  had already drifted (`v31906` in the artifact, `v31947` live, two days later).
+  The artifact now reads it at session time through the existing `html_input`
+  source (`<input name="app_version">` on `/agent/dashboard`) and sends it from
+  `session.request_headers`. Whether Zendesk rejects a stale version wasn't
+  established.
 
 ### Revision 6 changes (A14 qualification)
 
@@ -119,14 +142,8 @@ owner hasn't separately decided:
   on disk, and a caller opens it again to use it. Runs before this fix had that
   window between the walk's end and the browser closing, including the walk
   recorded below.
-- **A14 follow-ups, deferred to phase 2** (peer review, low):
-  - A declared GraphQL failure shape (for example
-    `/data/updateTicket/__typename == CreateOrUpdateTicketFailure`), so a
-    definite failure is `failed` at once instead of `uncertain` until the
-    180 s settle window passes.
-  - Zendesk's `apollographql-client-version` is pinned in the artifact and
-    will drift across deploys. It should be read from the page at session
-    time.
+- **A14 follow-ups** (peer review, low). Two are resolved; see
+  [Revision 7](#revision-7-changes-a14-follow-ups).
   - Writes fire the source's own triggers and notifications (for Zendesk,
     triggers and automations). `destructive` doesn't describe that kind of
     side effect. Reviewers should check the source's automation before
@@ -810,4 +827,5 @@ file lives outside this repository, so the owner records the row (U-4).
 | Nanos brokering to the Mac capability (A13) | **[Evidence]** 2026-10-31: the runtime on Nanos (DGX pod, published port 18080) accepted the Mac capability's outbound registration. A non-SDK MCP client on the Mac called it: three in-page reads ran in the Mac's Chrome profile against a loopback synthetic app, and a brokered write ran once with its duplicate answered from the receipt (one POST). The capability ran headless for this synthetic origin. |
 | Real-target qualification (A14) | **[Evidence] Passes (2026-11-01).** The owner's Zendesk test account, reached only through the browser session: no official-API credentials and no API token.<br>**Discovery.** A read-only walk (with GraphQL queries allowed) and an owner demonstration recorded in every tab (164 observations). The agent UI reads through REST (`/api/v2/tickets/{id}`, `/api/lotus/tickets/{id}/conversations.json`, `/api/lotus/tickets/recent`, `/api/v2/search.json`). It writes through GraphQL mutations (`CreateIssueTicketMutation`, `UpdateTicketMutation`), which need the `apollographql-client-name`/`-version` headers. Introspection is disabled. The comment format enum (`PLAIN`) and the required `uploads` field came from validation errors, sent with `uploads` left out so no probe executed.<br>**Artifact** `zendesk-agent@1` (private, `private/zendesk/integrations/`): 5 reads and 2 writes. Both writes declare `marker` reconcile, as the deferred two-phase claim requires. `create_ticket` puts the marker in a ticket tag and reconciles through `find_ticket_by_tag`. `add_internal_note` (`isPublic:false`) puts it in the note text and reconciles through `find_ticket_by_text`. Each write's identifier is `/data/<mutation>/ticket/id`, and `settle_seconds` is 180.<br>**Run.** Runtime on the Mac (loopback, static operator token, not OAuth), the Mac capability in headed Chrome, and a non-SDK MCP client:<br>• Reads: 175–200 ms (search 400 ms).<br>• `add_internal_note`: 727 ms, and the note exists once, internal.<br>• `create_ticket`: 561 ms, and exactly one ticket was created.<br>• Same-key retries replayed in under 1 ms without sending. Different input on the same key returned `idempotency_key_conflict`.<br>• **Settle:** search found the note marker within 9 s and the tag marker within 6 s (upper bounds).<br>• **Failure path:** a note to a missing ticket got HTTP 200 with a GraphQL failure and no identifier. It was classified `outcome_uncertain`, not `succeeded`. Reconcile kept it uncertain inside the settle window and resolved it `not_applied` after.<br>• Logs: 30 executed jobs, no warnings, and no ticket content or markers.<br>**Not covered:** OAuth/CIMD for this client (D-15; OAuth is qualified only synthetically), a Nanos runtime for Zendesk, a session expiring mid-run, and drift of `apollographql-client-version` across Zendesk deploys. |
 | Read-only walk under the socket guards | **[Evidence]** 2026-11-02, same Zendesk account and profile, headed Chrome, the same walk task as A14. The session was still signed in. 131 observations and 431 requests, against 81 and 250 before the guards (the same task, so the runs aren't a controlled comparison). 120 writes were blocked. 3 cross-site frames or workers were held paused and reported as gaps. One blocked route seen earlier didn't recur (a billing experiment's `participation` POST). Of the routes the artifact uses, the walk saw `/api/v2/tickets/{id}`, `/api/v2/search.json` and `/api/graphql`. It didn't see `/api/lotus/tickets/{id}/conversations.json` or `/api/lotus/tickets/recent`. The earlier read-only walk didn't see them either; they came from the owner demonstration, so this walk doesn't show whether the guards affect them. That run predated the fix that stops pages before the guards end, so its held targets were released, and its last page kept running without the write guard, until the browser closed moments later. **Rerun with the fix,** 2026-11-03, same task, with the walk ending by stopping Chrome: 131 observations, 426 requests, 116 writes blocked, 3 targets held. No Chrome process stayed on that profile. Blocked and request counts vary from run to run, because the app chooses what to send. |
+| Client version and declared failure (Revision 7) | **[Evidence]** 2026-11-02, the owner's Zendesk test account, Mac runtime and capability in headed Chrome, static token, a non-SDK MCP client, artifact `zendesk-agent@3`.<br>• Client version read at session time: one read (about 300 ms) and one internal note (593 ms, `succeeded`, its retry replayed in under 1 ms without sending).<br>• A note to a missing ticket: `source_refused`, `failed` in 310 ms, against `uncertain` until the 180 s window before. A retry with the same key returned the final receipt without sending.<br>• Logs: no warnings.<br>**Not covered:** `create_ticket` declares the same failure shapes, but no failing create was sent, and `CreateOrUpdateTicketFailure` was never seen in an answer. |
 | Deployed service | None. |
