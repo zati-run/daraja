@@ -432,12 +432,14 @@ func TestFormActionComparesTheQuerySent(t *testing.T) {
 
 func TestLocationOnAnOrdinaryAnswerIsNotRead(t *testing.T) {
 	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/[0-9]+$", Extract: map[string]Extract{"id": {LocationRegex: "^/notes/([0-9]+)$"}}}}
-	a := Answer{Status: 200, Location: "/notes/7"}
-	if o.RedirectSucceeded("http://a.test", a) {
-		t.Error("a 200 with a Location counted as a redirect")
-	}
-	if v, ok := o.ExtractValues("http://a.test", a, Vars{})["id"]; ok {
-		t.Errorf("extracted %q from a 200", v)
+	for _, status := range []int{200, 300, 304} {
+		a := Answer{Status: status, Location: "/notes/7"}
+		if o.RedirectSucceeded("http://a.test", a) {
+			t.Errorf("a %d with a Location counted as a redirect", status)
+		}
+		if v, ok := o.ExtractValues("http://a.test", a, Vars{})["id"]; ok {
+			t.Errorf("extracted %q from a %d", v, status)
+		}
 	}
 }
 
