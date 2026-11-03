@@ -348,7 +348,13 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 	if !ok || !sameTarget(req.URL.RequestURI(), actionPath) {
 		return nil, fmt.Errorf("%w: the form's action changed", ErrSourceChanged)
 	}
-	values, names := formValues(doc, form)
+	values, names, computed := formValues(doc, form)
+	for name := range computed {
+		if _, declared := o.Request.Form[name]; !declared {
+			// Errors reach receipts, so this doesn't name the field.
+			return nil, fmt.Errorf("%w: the form has a control whose default a browser would change before sending", ErrSourceChanged)
+		}
+	}
 	for k, t := range o.Request.Form {
 		control, ok := names[k]
 		if !ok {
@@ -454,8 +460,9 @@ func controlDisabled(n *html.Node) bool {
 // every enabled named control. Buttons are named controls but send no value unless
 // the artifact declares them. A disabled control isn't named, so declaring one
 // counts as drift.
-func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom) {
+func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[string]bool) {
 	values, names := url.Values{}, map[string]atom.Atom{}
+	computed, overridden := map[string]bool{}, map[string]bool{}
 	// A later checked radio unchecks an earlier one in its group.
 	radios := map[string]*html.Node{}
 	var find func(*html.Node)
@@ -486,11 +493,18 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom) {
 			case n.DataAtom == atom.Input:
 				t, _ := attr(n, "type")
 				t = strings.ToLower(t)
-				if !submitOverride(n, t) {
-					names[name] = atom.Input
+				if submitOverride(n, t) {
+					overridden[name] = true
 				}
+				names[name] = atom.Input
 				switch t {
 				case "submit", "button", "reset", "image", "file":
+				case "range", "number", "color", "date", "time", "datetime-local", "month", "week":
+					// A browser clamps or rewrites these, so the page's own value
+					// may not be what it would send. Only a declared value is known.
+					computed[name] = true
+					val, _ := attr(n, "value")
+					values.Add(name, val)
 				case "radio":
 					if radios[name] == n {
 						val, ok := attr(n, "value")
@@ -523,9 +537,10 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom) {
 				if !ok {
 					t = "submit"
 				}
-				if !submitOverride(n, strings.ToLower(t)) {
-					names[name] = atom.Button
+				if submitOverride(n, strings.ToLower(t)) {
+					overridden[name] = true
 				}
+				names[name] = atom.Button
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -533,7 +548,11 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom) {
 		}
 	}
 	walk(doc)
-	return values, names
+	// Even if another control has the name, declaring it could mean the button.
+	for name := range overridden {
+		delete(names, name)
+	}
+	return values, names, computed
 }
 
 // submitOverride reports a submit button that sends the form somewhere else or
