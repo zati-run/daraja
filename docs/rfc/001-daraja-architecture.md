@@ -51,10 +51,13 @@ hasn't separately decided, and the details below replace the sketch in
 
 - **Reads** fetch a page and take outputs from `response.extract`: a CSS
   selector with an optional attribute and text anchor, an anchored
-  `location_regex`, or a JSON Pointer. A text anchor can use `{{input.x}}`, so
+  `location_regex` (its anchors apply to the whole pattern), or a JSON Pointer. A text anchor can use `{{input.x}}`, so
   a reconcile read can find a marker in an HTML list.
-- **Writes** fetch `request.form_page` first. The submitted values are the
-  form's own, including its CSRF token, with `request.form` set over them.
+- **Writes** must declare `request.form_page` and fetch it first. The submitted
+  values are what a browser would send for that form, including its CSRF token,
+  with `request.form` set over them. That follows form ownership, disabled
+  fieldsets and options, and `<base href>`. A page over 8 MiB is drift, because a
+  cut-off page could lose a field.
 - **Drift is checked before sending.** The selector must match exactly one
   form, and its method, action and encoding must match the artifact, and every
   declared field must exist. Otherwise the write is `failed/not_sent` with

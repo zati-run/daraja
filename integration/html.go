@@ -98,12 +98,14 @@ func validateExtract(where string, e Extract, add func(string, ...any)) {
 }
 
 // compileLocationRegex requires an anchored pattern, so that a sign-in page
-// whose URL merely contains a matching piece never counts as success.
+// whose URL merely contains a matching piece never counts as success. The anchors
+// are applied to the whole pattern: in ^/a|/b$, they would each bind to only one
+// alternative, and /a/login would match.
 func compileLocationRegex(s string) (*regexp.Regexp, error) {
 	if !strings.HasPrefix(s, "^") || !strings.HasSuffix(s, "$") {
 		return nil, fmt.Errorf("%q must start with ^ and end with $", s)
 	}
-	return regexp.Compile(s)
+	return regexp.Compile("^(?:" + s[1:len(s)-1] + ")$")
 }
 
 // LocalLocation resolves a location against the origin and returns its path
@@ -302,26 +304,27 @@ func (o *Operation) FormFields(origin string, page []byte, target string, v Vars
 		return nil, fmt.Errorf("%w: %q matches %d elements, want one form", ErrSourceChanged, fp.Selector, len(forms))
 	}
 	form := forms[0]
+	// Errors here reach receipts, so they name no value from the page.
 	method, _ := attr(form, "method")
 	if method == "" {
 		method = "GET"
 	}
 	if !strings.EqualFold(method, o.Request.Method) {
-		return nil, fmt.Errorf("%w: the form uses %s, not %s", ErrSourceChanged, strings.ToUpper(method), o.Request.Method)
+		return nil, fmt.Errorf("%w: the form's method changed", ErrSourceChanged)
 	}
 	if enc, ok := attr(form, "enctype"); ok && !strings.EqualFold(enc, "application/x-www-form-urlencoded") {
-		return nil, fmt.Errorf("%w: the form uses encoding %q", ErrSourceChanged, enc)
+		return nil, fmt.Errorf("%w: the form's encoding changed", ErrSourceChanged)
 	}
-	action, _ := attr(form, "action")
-	if action == "" {
-		action = fp.Path
+	pagePath, err := o.FormPagePath(v)
+	if err != nil {
+		return nil, err
 	}
 	targetPath, ok1 := LocalLocation(origin, target)
-	actionPath, ok2 := LocalLocation(origin, action)
+	actionPath, ok2 := formAction(origin, pagePath, doc, form)
 	if !ok1 || !ok2 || targetPath != actionPath {
 		return nil, fmt.Errorf("%w: the form's action changed", ErrSourceChanged)
 	}
-	values, names := formValues(form)
+	values, names := formValues(doc, form)
 	for k, t := range o.Request.Form {
 		if !names[k] {
 			return nil, fmt.Errorf("%w: the form has no field %q", ErrSourceChanged, k)
@@ -338,28 +341,94 @@ func (o *Operation) FormFields(origin string, page []byte, target string, v Vars
 	return values, nil
 }
 
+// formAction returns the path and query the form posts to, resolved as a browser
+// would: against the page, or its <base href>. ok is false when it leaves the
+// origin.
+func formAction(origin, pagePath string, doc, form *html.Node) (string, bool) {
+	page, err := url.Parse(origin + pagePath)
+	if err != nil {
+		return "", false
+	}
+	base := page
+	if sel, err := cascadia.Parse("base[href]"); err == nil {
+		if n := cascadia.Query(doc, sel); n != nil {
+			href, _ := attr(n, "href")
+			if base, err = page.Parse(href); err != nil {
+				return "", false
+			}
+		}
+	}
+	action, _ := attr(form, "action")
+	u := page // an empty action posts to the page itself, whatever the base says
+	if action != "" {
+		if u, err = base.Parse(action); err != nil {
+			return "", false
+		}
+	}
+	return LocalLocation(origin, u.String())
+}
+
+// ownedBy reports whether a control belongs to form: by its form attribute if it
+// has one, otherwise by being inside it.
+func ownedBy(n, form *html.Node) bool {
+	if id, ok := attr(n, "form"); ok {
+		own, has := attr(form, "id")
+		return has && own == id
+	}
+	for p := n.Parent; p != nil; p = p.Parent {
+		if p.DataAtom == atom.Form {
+			return p == form
+		}
+	}
+	return false
+}
+
+// controlDisabled reports whether a control is disabled, by its own attribute or
+// by a disabled fieldset around it. Controls in a fieldset's first legend stay
+// enabled.
+func controlDisabled(n *html.Node) bool {
+	if _, on := attr(n, "disabled"); on {
+		return true
+	}
+	child := n
+	for p := n.Parent; p != nil; child, p = p, p.Parent {
+		if p.DataAtom != atom.Fieldset {
+			continue
+		}
+		if _, on := attr(p, "disabled"); !on {
+			continue
+		}
+		first := p.FirstChild
+		for first != nil && (first.Type != html.ElementNode || first.DataAtom != atom.Legend) {
+			first = first.NextSibling
+		}
+		if child != first {
+			return true
+		}
+	}
+	return false
+}
+
 // formValues returns what a browser would submit for a form, and the name of
-// every named control. Buttons are named controls but send no value unless
-// the artifact declares them.
-func formValues(form *html.Node) (url.Values, map[string]bool) {
+// every enabled named control. Buttons are named controls but send no value unless
+// the artifact declares them. A disabled control isn't named, so declaring one
+// counts as drift.
+func formValues(doc, form *html.Node) (url.Values, map[string]bool) {
 	values, names := url.Values{}, map[string]bool{}
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && n != form {
+		if n.Type == html.ElementNode {
+			if n.DataAtom == atom.Datalist || n.DataAtom == atom.Template {
+				return // never submitted
+			}
 			name, named := attr(n, "name")
-			_, disabled := attr(n, "disabled")
-			named = named && name != ""
-			switch n.DataAtom {
-			case atom.Input:
+			named = named && name != "" && ownedBy(n, form) && !controlDisabled(n)
+			switch {
+			case !named:
+			case n.DataAtom == atom.Input:
+				names[name] = true
 				t, _ := attr(n, "type")
-				t = strings.ToLower(t)
-				if named {
-					names[name] = true
-				}
-				if !named || disabled {
-					break
-				}
-				switch t {
+				switch strings.ToLower(t) {
 				case "submit", "button", "reset", "image", "file":
 				case "checkbox", "radio":
 					if _, on := attr(n, "checked"); on {
@@ -373,33 +442,28 @@ func formValues(form *html.Node) (url.Values, map[string]bool) {
 					val, _ := attr(n, "value")
 					values.Add(name, val)
 				}
-			case atom.Textarea:
-				if named {
-					names[name] = true
-					if !disabled {
-						values.Add(name, rawText(n))
-					}
-				}
-			case atom.Select:
-				if named {
-					names[name] = true
-					if !disabled {
-						selectValue(n, name, values)
-					}
-				}
+			case n.DataAtom == atom.Textarea:
+				names[name] = true
+				values.Add(name, crlf(rawText(n)))
+			case n.DataAtom == atom.Select:
+				names[name] = true
+				selectValue(n, name, values)
 				return
-			case atom.Button:
-				if named {
-					names[name] = true
-				}
+			case n.DataAtom == atom.Button:
+				names[name] = true
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
 		}
 	}
-	walk(form)
+	walk(doc)
 	return values, names
+}
+
+// crlf normalizes newlines as a browser does when it submits a textarea.
+func crlf(s string) string {
+	return strings.NewReplacer("\r\n", "\r\n", "\r", "\r\n", "\n", "\r\n").Replace(s)
 }
 
 func rawText(n *html.Node) string {
@@ -417,7 +481,9 @@ func selectValue(n *html.Node, name string, values url.Values) {
 	var walk func(*html.Node)
 	walk = func(c *html.Node) {
 		if c.Type == html.ElementNode && c.DataAtom == atom.Option {
-			opts = append(opts, c)
+			if _, off := attr(c, "disabled"); !off && !optgroupDisabled(c) {
+				opts = append(opts, c)
+			}
 		}
 		for k := c.FirstChild; k != nil; k = k.NextSibling {
 			walk(k)
@@ -430,16 +496,34 @@ func selectValue(n *html.Node, name string, values url.Values) {
 		}
 		return nodeText(o)
 	}
-	picked := false
+	selected := []*html.Node{}
 	for _, o := range opts {
 		if _, on := attr(o, "selected"); on {
-			values.Add(name, optVal(o))
-			picked = true
+			selected = append(selected, o)
 		}
 	}
-	if _, multi := attr(n, "multiple"); !picked && !multi && len(opts) > 0 {
-		values.Add(name, optVal(opts[0]))
+	_, multi := attr(n, "multiple")
+	switch {
+	case multi:
+		for _, o := range selected {
+			values.Add(name, optVal(o))
+		}
+	case len(selected) > 0: // a single select keeps the last one marked
+		values.Add(name, optVal(selected[len(selected)-1]))
+	case len(opts) > 0:
+		// A drop-down shows its first option; a list box shows none selected.
+		if size, _ := attr(n, "size"); size == "" || size == "0" || size == "1" {
+			values.Add(name, optVal(opts[0]))
+		}
 	}
+}
+
+func optgroupDisabled(o *html.Node) bool {
+	if o.Parent != nil && o.Parent.DataAtom == atom.Optgroup {
+		_, off := attr(o.Parent, "disabled")
+		return off
+	}
+	return false
 }
 
 // Build renders the operation's request. For a form submission, fields holds

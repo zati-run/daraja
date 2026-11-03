@@ -10,7 +10,9 @@ package browser
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -375,7 +377,18 @@ func (b *Browser) Fetch(ctx context.Context, in *integration.Compiled, req capab
 	if err := b.onOrigin(ctx, in.Source.Origin); err != nil {
 		return capability.FetchResult{}, fmt.Errorf("%w: %v", capability.ErrNotSent, err)
 	}
-	payload := map[string]any{"method": req.Method, "url": req.URL, "headers": req.Headers, "body": nil}
+	reqURL, fragment := req.URL, ""
+	if req.WantLocation {
+		// A random fragment never reaches the server, but the network events
+		// carry it, so they can't be confused with another request to this URL.
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return capability.FetchResult{}, fmt.Errorf("%w: %v", capability.ErrNotSent, err)
+		}
+		fragment = "#" + hex.EncodeToString(nonce[:])
+		reqURL += fragment
+	}
+	payload := map[string]any{"method": req.Method, "url": reqURL, "headers": req.Headers, "body": nil}
 	if req.Body != nil {
 		payload["body"] = base64.StdEncoding.EncodeToString(req.Body)
 	}
@@ -389,7 +402,7 @@ func (b *Browser) Fetch(ctx context.Context, in *integration.Compiled, req capab
 	defer stop()
 	var redirect func() (int, string)
 	if req.WantLocation {
-		redirect, err = b.watchRedirect(ectx, req.Method, req.URL)
+		redirect, err = b.watchRedirect(ectx, req.Method, req.URL, fragment)
 		if err != nil {
 			return capability.FetchResult{}, fmt.Errorf("%w: %v", capability.ErrNotSent, err)
 		}
@@ -430,11 +443,10 @@ func (b *Browser) Fetch(ctx context.Context, in *integration.Compiled, req capab
 }
 
 // watchRedirect reports the status and Location of the redirect answering the
-// next request with this method and URL. A page's fetch can't read them, so
+// request with this method, URL and fragment. A page's fetch can't read them, so
 // they come from the browser's own network events. The result is 0 and "" when
-// they didn't arrive in time, or when two requests match and so the answer
-// can't be told apart. The caller then treats the redirect as undeclared.
-func (b *Browser) watchRedirect(ctx context.Context, method, target string) (func() (int, string), error) {
+// they didn't arrive in time. The caller then treats the redirect as undeclared.
+func (b *Browser) watchRedirect(ctx context.Context, method, target, fragment string) (func() (int, string), error) {
 	sent := chromedp.Events(ctx, network.RequestWillBeSent)
 	extra := chromedp.Events(ctx, network.ResponseReceivedExtraInfo)
 	if _, err := chromedp.Call(ctx, network.Enable, network.EnableParams{}); err != nil {
@@ -448,7 +460,7 @@ func (b *Browser) watchRedirect(ctx context.Context, method, target string) (fun
 			if err != nil {
 				return
 			}
-			if ev.Request != nil && ev.Request.Method == method && ev.Request.URL == target {
+			if ev.Request != nil && ev.Request.Method == method && ev.Request.URL == target && ev.Request.URLFragment == fragment {
 				mu.Lock()
 				ids[ev.RequestID] = true
 				mu.Unlock()

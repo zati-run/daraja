@@ -89,6 +89,95 @@ func TestFormFieldsRefusesDrift(t *testing.T) {
 	}
 }
 
+func TestFormFieldsLeakNoPageValues(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "new"}}
+	for _, page := range []string{
+		strings.Replace(formPage, `method="POST"`, `method="POST" enctype="secret-value"`, 1),
+		strings.Replace(formPage, `method="POST"`, `method="secret-value"`, 1),
+	} {
+		_, err := formOp(nil).FormFields("http://a.test", []byte(page), "/notes", v)
+		if !errors.Is(err, ErrSourceChanged) || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "SECRET") {
+			t.Errorf("err = %v", err)
+		}
+	}
+}
+
+func TestFormActionResolvesAgainstThePage(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "new", "id": "7"}}
+	page := func(form string) []byte { return []byte(form + `<input name="title"></form>`) }
+	cases := []struct {
+		name, html, formPath, target string
+		ok                           bool
+	}{
+		{"relative action", `<form id="f" method="post" action="create">`, "/notes/new", "/notes/create", true},
+		{"relative action isn't the root", `<form id="f" method="post" action="create">`, "/notes/new", "/create", false},
+		{"empty action posts to the page", `<form id="f" method="post">`, "/notes/new", "/notes/new", true},
+		{"empty action on a templated page", `<form id="f" method="post">`, "/notes/{{input.id}}/edit", "/notes/7/edit", true},
+		{"base changes a relative action", `<base href="/v2/"><form id="f" method="post" action="create">`, "/notes/new", "/v2/create", true},
+		{"base leaving the origin is drift", `<base href="https://evil.test/"><form id="f" method="post" action="create">`, "/notes/new", "/create", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := formOp(func(o *Operation) { o.Request.FormPage.Path = tc.formPath })
+			_, err := o.FormFields("http://a.test", page(tc.html), tc.target, v)
+			if tc.ok && err != nil {
+				t.Errorf("err = %v", err)
+			}
+			if !tc.ok && !errors.Is(err, ErrSourceChanged) {
+				t.Errorf("err = %v, want ErrSourceChanged", err)
+			}
+		})
+	}
+}
+
+func TestFormFieldsFollowFormRules(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "new"}}
+	wrap := func(inner, after string) []byte {
+		return []byte(`<form id="f" method="post" action="/notes"><input name="title">` + inner + `</form>` + after)
+	}
+	cases := []struct {
+		name string
+		page []byte
+		want string
+	}{
+		{"disabled fieldset", wrap(`<fieldset disabled><input name="delete" value="1"></fieldset>`, ""), "title=new"},
+		{"first legend of a disabled fieldset stays enabled", wrap(`<fieldset disabled><legend><input name="a" value="1"></legend><legend><input name="b" value="2"></legend></fieldset>`, ""), "a=1&title=new"},
+		{"control outside, owned by id", wrap("", `<input type="hidden" name="state" value="s" form="f">`), "state=s&title=new"},
+		{"control inside, owned by another form", wrap(`<input name="other" value="o" form="g">`, ""), "title=new"},
+		{"datalist is never submitted", wrap(`<datalist><input name="d" value="1"></datalist>`, ""), "title=new"},
+		{"disabled option is skipped", wrap(`<select name="s"><option value="a" disabled>A</option><option value="b">B</option></select>`, ""), "s=b&title=new"},
+		{"disabled optgroup is skipped", wrap(`<select name="s"><optgroup disabled><option value="a" selected>A</option></optgroup><option value="b">B</option></select>`, ""), "s=b&title=new"},
+		{"single select keeps the last selected", wrap(`<select name="s"><option value="a" selected>A</option><option value="b" selected>B</option></select>`, ""), "s=b&title=new"},
+		{"list box with nothing selected sends nothing", wrap(`<select name="s" size="3"><option value="a">A</option></select>`, ""), "title=new"},
+		{"textarea newlines become CRLF", wrap("<textarea name=\"t\">a\nb</textarea>", ""), "t=a%0D%0Ab&title=new"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := formOp(nil).FormFields("http://a.test", tc.page, "/notes", v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Encode() != tc.want {
+				t.Errorf("fields = %s, want %s", got.Encode(), tc.want)
+			}
+		})
+	}
+	// A declared field that's disabled can't be submitted by a person either.
+	disabled := []byte(`<form id="f" method="post" action="/notes"><fieldset disabled><input name="title"></fieldset></form>`)
+	if _, err := formOp(nil).FormFields("http://a.test", disabled, "/notes", v); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("declared disabled field: err = %v, want ErrSourceChanged", err)
+	}
+}
+
+func TestLocationRegexAnchorsTheWholePattern(t *testing.T) {
+	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/([0-9]+)|/done$"}}
+	for loc, want := range map[string]bool{"/notes/123": true, "/done": true, "/notes/123/login": false, "/x/done": false} {
+		if got := o.RedirectSucceeded("http://a.test", Answer{Location: loc}); got != want {
+			t.Errorf("RedirectSucceeded(%s) = %v, want %v", loc, got, want)
+		}
+	}
+}
+
 func TestExtractValues(t *testing.T) {
 	page := []byte(`<ul><li class="n" data-id="1"><a>First</a> <small>m-1</small></li><li class="n" data-id="2"><a>Second</a> <small>m-2</small><script>no()</script></li></ul>`)
 	o := &Operation{Execution: ExecHTTPFormHTML, Response: ResponseSpec{Extract: map[string]Extract{

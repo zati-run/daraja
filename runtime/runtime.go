@@ -796,9 +796,13 @@ func (r *Runtime) formFields(ctx context.Context, in *integration.Compiled, op *
 		return nil, errf(CodeNotSent, "form page: %s", errClass(err))
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
 	if err != nil {
 		return nil, errf(CodeNotSent, "form page: %s", errClass(err))
+	}
+	if len(body) > 8<<20 {
+		// Parsing a cut-off page would submit the form without what came after.
+		return nil, errf(CodeSourceChanged, "the form page exceeds 8 MiB")
 	}
 	switch {
 	case resp.StatusCode >= 300 && resp.StatusCode < 400, resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:

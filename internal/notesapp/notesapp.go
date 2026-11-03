@@ -23,6 +23,8 @@ type App struct {
 	// answering, so tests can lose or interrupt the response.
 	SlowTitle string
 	SlowFor   time.Duration
+	// FormPadding adds this many bytes before the note form's closing tag.
+	FormPadding int
 	// FormDrift renames the note form's title field, as a redesign would.
 	FormDrift bool
 	// RedirectUnauthenticated makes the API redirect a request without a
@@ -247,7 +249,7 @@ func (a *App) notesHTML(w http.ResponseWriter, r *http.Request) {
 <input type="hidden" name="csrf" value="c-` + sid + `">
 <input name="` + title + `"><textarea name="body"></textarea><input type="hidden" name="ref" value="">
 <select name="color"><option value="plain" selected>Plain</option><option value="red">Red</option></select>
-<button type="submit" name="save" value="1">Save</button></form></body></html>`
+<button type="submit" name="save" value="1">Save</button>` + strings.Repeat(" ", a.FormPadding) + `</form></body></html>`
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/notes")
 	switch {
