@@ -134,6 +134,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<!doctype html><html><body><script>new WebSocket('ws://' + location.host + '/ws');</script></body></html>`)
 	case r.URL.Path == "/popup-now":
 		fmt.Fprint(w, `<!doctype html><html><body><script>fetch('/api/sink', {method: 'POST', body: 'popup'});</script></body></html>`)
+	case r.URL.Path == "/late-popup":
+		fmt.Fprint(w, `<!doctype html><html><body><script>setInterval(() => fetch('/api/sink', {method: 'POST', body: 'late popup'}), 1000);</script></body></html>`)
 	case r.URL.Path == "/api/sink" && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions:
 		// Counts any write that reaches the app, from any vector.
 		a.mu.Lock()
@@ -299,7 +301,9 @@ func (a *App) graphQL(w http.ResponseWriter, r *http.Request, sid string) {
 // writersPage tries every write vector a read-only walk must block: a form
 // posted to a new window, a new window that writes at once, a dedicated
 // worker, a beacon, a GraphQL mutation over GET, and WebSockets opened from a
-// page, a worker, a nested worker, a shared worker and a cross-site frame.
+// page, a worker, a nested worker, a shared worker and a cross-site frame. Two
+// keep writing on a timer, in the page and in a popup, to catch a page left
+// running after the walk's guards end.
 // Each lands on a route that counts a create.
 const writersPage = `<!doctype html><html><body>
 <form id=f method=post action="/api/sink" target="_blank"><input name=x value=1></form>
@@ -315,6 +319,8 @@ const writersPage = `<!doctype html><html><body>
 <button id=wsnested onclick="new Worker('/ws-nested.js')">wsnested</button>
 <button id=wsshared onclick="new SharedWorker('/ws-worker.js')">wsshared</button>
 <button id=wsframe onclick="const f = document.createElement('iframe'); f.src = 'http://' + (location.hostname === 'localhost' ? '127.0.0.1' : 'localhost') + ':' + location.port + '/ws-frame'; document.body.appendChild(f)">wsframe</button>
+<button id=latewrite onclick="setInterval(() => fetch('/api/sink', {method: 'POST', body: 'late'}), 1000)">latewrite</button>
+<button id=latepopup onclick="window.open('/late-popup', '_blank')">latepopup</button>
 <button id=gqlget onclick="fetch('/api/graphql?query=' + encodeURIComponent('mutation M { createNote(title: &quot;x&quot;) { id } }'))">gqlget</button>
 </body></html>`
 
