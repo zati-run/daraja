@@ -304,6 +304,9 @@ func (h *Host) formFields(ctx context.Context, b *hostBinding, in *integration.C
 	if res.Status != http.StatusOK {
 		return nil, notSent(CodeSourceChanged, "the form page answered %d", res.Status), false
 	}
+	if !integration.UTF8ContentType(res.Headers.Get("Content-Type")) {
+		return nil, notSent(CodeSourceChanged, "the form page isn't encoded as UTF-8"), false
+	}
 	fields, err := op.FormFields(in.Source.Origin, res.Body, vars)
 	if errors.Is(err, integration.ErrSourceChanged) {
 		return nil, notSent(CodeSourceChanged, "%v", err), false

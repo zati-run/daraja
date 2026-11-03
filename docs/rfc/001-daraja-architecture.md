@@ -59,8 +59,11 @@ hasn't separately decided, and the details below replace the sketch in
   over them. They follow the common rules a browser applies: form ownership,
   disabled fieldsets and options, drop-down defaults, radio groups and textarea
   newlines. Daraja doesn't reimplement how browsers sanitize values. A default
-  it can't reproduce exactly, such as a number, email, date, or list-box control
-  or a text value with a newline, is drift unless the artifact sets that field.
+  it can't reproduce exactly is drift unless the artifact sets that field: for
+  example a number, email, date or list-box control, a text value with a newline,
+  `_charset_`, `dirname`, or a hard-wrapped textarea. A form a page encodes as
+  anything but UTF-8, by its `Content-Type`, `<meta>` or `accept-charset`, is
+  drift.
   A page that changes values with script at submit isn't covered. Declaring a
   name that a button with its own `formaction` or similar also uses is drift.
   The action must match the

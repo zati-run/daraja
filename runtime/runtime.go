@@ -808,6 +808,8 @@ func (r *Runtime) formFields(ctx context.Context, in *integration.Compiled, op *
 		return nil, errf(CodeSessionUnavailable, "the form page needs a new session")
 	case resp.StatusCode != http.StatusOK:
 		return nil, errf(CodeSourceChanged, "the form page answered %d", resp.StatusCode)
+	case !integration.UTF8ContentType(resp.Header.Get("Content-Type")):
+		return nil, errf(CodeSourceChanged, "the form page isn't encoded as UTF-8")
 	}
 	fields, err := op.FormFields(in.Source.Origin, body, vars)
 	if errors.Is(err, integration.ErrSourceChanged) {
