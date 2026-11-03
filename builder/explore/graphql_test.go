@@ -1,6 +1,8 @@
 package explore
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	"github.com/chromedp/cdproto/network"
@@ -122,5 +124,22 @@ func TestReadSafeRefusesMethodOverride(t *testing.T) {
 		if readSafe(task, r) {
 			t.Errorf("readSafe(%s %s %v) = true, want false", r.Method, r.URL, r.Headers)
 		}
+	}
+}
+
+func TestSocketGuardDetachBeforeHold(t *testing.T) {
+	g := newSocketGuard(context.Background(), context.Background(), &sync.WaitGroup{})
+	g.detached("s1") // handled before its attach event
+	g.hold("s1")
+	g.hold("s2")
+	if n := g.waitHeldGone(context.Background(), 0); n != 1 {
+		t.Fatalf("held = %d, want 1 (only s2)", n)
+	}
+	g.detached("s2")
+	if n := g.waitHeldGone(context.Background(), 0); n != 0 {
+		t.Fatalf("held = %d, want 0", n)
+	}
+	if g.heldEver != 2 {
+		t.Fatalf("heldEver = %d, want 2", g.heldEver)
 	}
 }

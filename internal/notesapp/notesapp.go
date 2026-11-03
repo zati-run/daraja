@@ -302,8 +302,8 @@ func (a *App) graphQL(w http.ResponseWriter, r *http.Request, sid string) {
 // posted to a new window, a new window that writes at once, a dedicated
 // worker, a beacon, a GraphQL mutation over GET, and WebSockets opened from a
 // page, a worker, a nested worker, a shared worker and a cross-site frame. Two
-// keep writing on a timer, in the page and in a popup, to catch a page left
-// running after the walk's guards end.
+// keep writing on a timer, in the page and in a popup, and one keeps opening
+// such popups, to catch a page left running after the walk's guards end.
 // Each lands on a route that counts a create.
 const writersPage = `<!doctype html><html><body>
 <form id=f method=post action="/api/sink" target="_blank"><input name=x value=1></form>
@@ -321,6 +321,7 @@ const writersPage = `<!doctype html><html><body>
 <button id=wsframe onclick="const f = document.createElement('iframe'); f.src = 'http://' + (location.hostname === 'localhost' ? '127.0.0.1' : 'localhost') + ':' + location.port + '/ws-frame'; document.body.appendChild(f)">wsframe</button>
 <button id=latewrite onclick="setInterval(() => fetch('/api/sink', {method: 'POST', body: 'late'}), 1000)">latewrite</button>
 <button id=latepopup onclick="window.open('/late-popup', '_blank')">latepopup</button>
+<button id=latechurn onclick="setInterval(() => window.open('/late-popup', '_blank'), 1000)">latechurn</button>
 <button id=gqlget onclick="fetch('/api/graphql?query=' + encodeURIComponent('mutation M { createNote(title: &quot;x&quot;) { id } }'))">gqlget</button>
 </body></html>`
 

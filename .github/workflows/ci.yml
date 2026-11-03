@@ -29,7 +29,7 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: go test -race
         shell: bash
-        run: go test -race -v -timeout 25m ./... 2>&1 | tee test.log
+        run: go test -count=1 -race -v -timeout 25m ./... 2>&1 | tee test.log
       - name: Fail on skipped tests
         # The browser tests skip when Chrome can't start, which would turn
         # this job green without running them.
