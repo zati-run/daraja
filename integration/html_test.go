@@ -58,8 +58,8 @@ func TestFormFieldsSubmitsWhatABrowserWould(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := url.Values{"csrf": {"tok"}, "title": {"new"}, "body": {" kept "}, "on": {"yes"}, "color": {"b"}, "size": {"Small"}}
-	if got.Encode() != want.Encode() {
-		t.Errorf("fields = %s\nwant     %s", got.Encode(), want.Encode())
+	if got.Values().Encode() != want.Encode() {
+		t.Errorf("fields = %s\nwant     %s", got.Values().Encode(), want.Encode())
 	}
 }
 
@@ -167,8 +167,8 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Encode() != tc.want {
-				t.Errorf("fields = %s, want %s", got.Encode(), tc.want)
+			if got.Values().Encode() != tc.want {
+				t.Errorf("fields = %s, want %s", got.Values().Encode(), tc.want)
 			}
 		})
 	}
@@ -353,6 +353,32 @@ func TestFormPageWithInvalidUTF8IsDrift(t *testing.T) {
 	}
 }
 
+func TestFieldsKeepPageOrder(t *testing.T) {
+	page := []byte(`<form id="f" method="post" action="/notes"><input type="hidden" name="i[id]" value="1"><input type="hidden" name="i[qty]" value="10"><input type="hidden" name="i[id]" value="2"><input name="title"><input type="hidden" name="i[qty]" value="20"></form>`)
+	got, err := formOp(nil).FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "t"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "i%5Bid%5D=1&i%5Bqty%5D=10&i%5Bid%5D=2&title=t&i%5Bqty%5D=20"
+	if got.Encode() != want {
+		t.Errorf("body = %s\nwant   %s", got.Encode(), want)
+	}
+}
+
+func TestActionABrowserReadsDifferentlyIsDrift(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "t"}}
+	for _, form := range []string{
+		`<form id="f" method="post" action="/\evil.test/notes">`,
+		`<form id="f" method="post" action="/x/%2e%2e/notes">`,
+		`<base href="/\evil.test/"><form id="f" method="post" action="notes">`,
+	} {
+		page := []byte(form + `<input name="title"></form>`)
+		if _, err := formOp(nil).FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
+			t.Errorf("%s: err = %v, want ErrSourceChanged", form, err)
+		}
+	}
+}
+
 func TestDuplicateFormIDIsDrift(t *testing.T) {
 	page := []byte(`<div id="f"></div><form id="f" method="post" action="/notes"><input name="title"><input form="f" type="hidden" name="delete" value="1"></form>`)
 	o := formOp(func(o *Operation) { o.Request.FormPage.Selector = "form#f" })
@@ -452,7 +478,7 @@ func TestLocationOnAnOrdinaryAnswerIsNotRead(t *testing.T) {
 
 func TestRelativeRedirectIsNotRead(t *testing.T) {
 	o := &Operation{Response: ResponseSpec{RedirectSuccess: "^/notes/[0-9]+$", Extract: map[string]Extract{"id": {LocationRegex: "^/notes/([0-9]+)$"}}}}
-	for loc, want := range map[string]bool{"notes/7": false, "./notes/7": false, "/notes/7": true, "http://a.test/notes/7": true, "//evil.test/notes/7": false, `/\evil.test/notes/7`: false, "/\t/evil.test/notes/7": false, " /notes/7": false} {
+	for loc, want := range map[string]bool{"notes/7": false, "./notes/7": false, "/notes/7": true, "http://a.test/notes/7": true, "//evil.test/notes/7": false, `/\evil.test/notes/7`: false, "/\t/evil.test/notes/7": false, " /notes/7": false, "/notes/%2e%2e": false, "/notes/%2E%2E": false} {
 		if got := o.RedirectSucceeded("http://a.test", Answer{Status: 303, Location: loc}); got != want {
 			t.Errorf("RedirectSucceeded(%s) = %v, want %v", loc, got, want)
 		}

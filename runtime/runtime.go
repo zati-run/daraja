@@ -22,7 +22,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -769,7 +768,7 @@ func (r *Runtime) send(ctx context.Context, in *integration.Compiled, op *integr
 // formFields fetches the operation's form page, if it has one, and reads the
 // values to submit. Every failure here is before the submission, so nothing
 // with an effect was sent.
-func (r *Runtime) formFields(ctx context.Context, in *integration.Compiled, op *integration.CompiledOp, s *session.Session, vars integration.Vars) (url.Values, *Error) {
+func (r *Runtime) formFields(ctx context.Context, in *integration.Compiled, op *integration.CompiledOp, s *session.Session, vars integration.Vars) (integration.Fields, *Error) {
 	if op.Request.FormPage == nil {
 		return nil, nil
 	}
