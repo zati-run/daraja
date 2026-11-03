@@ -10,7 +10,6 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -787,8 +786,7 @@ func (r *Runtime) mapResponse(op *integration.CompiledOp, status int, body []byt
 	}
 	var doc any
 	if len(op.Response.Output) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(body))
-		if err := dec.Decode(&doc); err != nil {
+		if err := json.Unmarshal(body, &doc); err != nil {
 			return nil, errf(CodeInvalidOutput, "the response is not JSON")
 		}
 	}
@@ -806,8 +804,10 @@ func wellFormed(op *integration.CompiledOp, body []byte) bool {
 	if op.Response.Identifier != "" {
 		return identifier(op, body) != ""
 	}
-	if len(op.Response.Output) > 0 {
-		return json.Valid(body)
+	if len(op.Response.Output) > 0 || len(op.Response.RefusedWhen) > 0 {
+		// The same check Refused makes: an answer it can't read says nothing
+		// either way, and JSON syntax alone would let it count as success.
+		return json.Unmarshal(body, new(any)) == nil
 	}
 	return true
 }
