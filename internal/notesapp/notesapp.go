@@ -260,7 +260,7 @@ func (a *App) notesHTML(w http.ResponseWriter, r *http.Request) {
 		defer a.mu.Unlock()
 		fmt.Fprint(w, `<!doctype html><html><body><ul id="notes">`)
 		for _, n := range a.notes {
-			fmt.Fprintf(w, `<li class="note" data-id="%d"><a href="/notes/%d">%s</a> <small>%s</small></li>`, n.ID, n.ID, html.EscapeString(n.Title), html.EscapeString(n.Ref))
+			fmt.Fprintf(w, `<li class="note"><a href="/notes/%d">%s</a> <small class="ref" data-id="%d">%s</small></li>`, n.ID, html.EscapeString(n.Title), n.ID, html.EscapeString(n.Ref))
 		}
 		fmt.Fprint(w, `</ul></body></html>`)
 	case rest == "" && r.Method == http.MethodPost:

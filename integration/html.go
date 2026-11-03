@@ -48,7 +48,9 @@ type Extract struct {
 	// Attr, or its text.
 	CSS  string `json:"css,omitempty"`
 	Attr string `json:"attr,omitempty"`
-	// Text is a text anchor: only elements whose text contains it match. It
+	// Text is a text anchor: only elements whose text contains it match. For a
+	// reconcile marker, select the element holding the marker alone: anchoring on a
+	// whole row would also match a marker that a person typed into a title. It
 	// may use {{input.x}}, for example to find a marker in a list.
 	Text string `json:"text,omitempty"`
 	// LocationRegex has one capture group, matched against the path and query
@@ -348,7 +350,8 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 	}
 	values, names := formValues(doc, form)
 	for k, t := range o.Request.Form {
-		if !names[k] {
+		control, ok := names[k]
+		if !ok {
 			return nil, fmt.Errorf("%w: the form has no field %q", ErrSourceChanged, k)
 		}
 		s, err := v.RenderString(t, nil)
@@ -357,6 +360,9 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 		}
 		if err != nil {
 			return nil, err
+		}
+		if control == atom.Textarea {
+			s = crlf(s)
 		}
 		values.Set(k, s)
 	}
@@ -448,27 +454,51 @@ func controlDisabled(n *html.Node) bool {
 // every enabled named control. Buttons are named controls but send no value unless
 // the artifact declares them. A disabled control isn't named, so declaring one
 // counts as drift.
-func formValues(doc, form *html.Node) (url.Values, map[string]bool) {
-	values, names := url.Values{}, map[string]bool{}
-	radios := map[string]*html.Node{} // the checked radio of each group
+func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom) {
+	values, names := url.Values{}, map[string]atom.Atom{}
+	// A later checked radio unchecks an earlier one in its group.
+	radios := map[string]*html.Node{}
+	var find func(*html.Node)
+	find = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			if n.DataAtom == atom.Datalist || n.DataAtom == atom.Template {
+				return
+			}
+			if group, ok := checkedRadio(n); ok && ownedBy(n, form) {
+				radios[group] = n
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			find(c)
+		}
+	}
+	find(doc)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			if n.DataAtom == atom.Datalist || n.DataAtom == atom.Template {
 				return // never submitted
 			}
-			if group, ok := checkedRadio(n); ok && ownedBy(n, form) {
-				radios[group] = n // a later one unchecks an earlier one
-			}
 			name, named := attr(n, "name")
 			named = named && name != "" && ownedBy(n, form) && !controlDisabled(n)
 			switch {
 			case !named:
 			case n.DataAtom == atom.Input:
-				names[name] = true
 				t, _ := attr(n, "type")
-				switch strings.ToLower(t) {
-				case "submit", "button", "reset", "image", "file", "radio":
+				t = strings.ToLower(t)
+				if !submitOverride(n, t) {
+					names[name] = atom.Input
+				}
+				switch t {
+				case "submit", "button", "reset", "image", "file":
+				case "radio":
+					if radios[name] == n {
+						val, ok := attr(n, "value")
+						if !ok {
+							val = "on"
+						}
+						values.Add(name, val)
+					}
 				case "checkbox":
 					if _, on := attr(n, "checked"); on {
 						val, ok := attr(n, "value")
@@ -482,14 +512,20 @@ func formValues(doc, form *html.Node) (url.Values, map[string]bool) {
 					values.Add(name, val)
 				}
 			case n.DataAtom == atom.Textarea:
-				names[name] = true
+				names[name] = atom.Textarea
 				values.Add(name, crlf(rawText(n)))
 			case n.DataAtom == atom.Select:
-				names[name] = true
+				names[name] = atom.Select
 				selectValue(n, name, values)
 				return
 			case n.DataAtom == atom.Button:
-				names[name] = true
+				t, ok := attr(n, "type")
+				if !ok {
+					t = "submit"
+				}
+				if !submitOverride(n, strings.ToLower(t)) {
+					names[name] = atom.Button
+				}
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -497,16 +533,22 @@ func formValues(doc, form *html.Node) (url.Values, map[string]bool) {
 		}
 	}
 	walk(doc)
-	for group, n := range radios {
-		if !controlDisabled(n) {
-			val, ok := attr(n, "value")
-			if !ok {
-				val = "on"
-			}
-			values.Add(group, val)
+	return values, names
+}
+
+// submitOverride reports a submit button that sends the form somewhere else or
+// some other way. The artifact can't declare it: its target is checked against
+// the form, not the button.
+func submitOverride(n *html.Node, typ string) bool {
+	if typ != "submit" && typ != "image" {
+		return false
+	}
+	for _, a := range []string{"formaction", "formmethod", "formenctype", "formtarget"} {
+		if _, ok := attr(n, a); ok {
+			return true
 		}
 	}
-	return values, names
+	return false
 }
 
 // checkedRadio returns the group of a radio button marked checked.
