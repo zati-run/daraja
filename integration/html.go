@@ -349,12 +349,7 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 		return nil, fmt.Errorf("%w: the form's action changed", ErrSourceChanged)
 	}
 	values, names, computed := formValues(doc, form)
-	for name := range computed {
-		if _, declared := o.Request.Form[name]; !declared {
-			// Errors reach receipts, so this doesn't name the field.
-			return nil, fmt.Errorf("%w: the form has a control whose default a browser would change before sending", ErrSourceChanged)
-		}
-	}
+	set := map[string]bool{}
 	for k, t := range o.Request.Form {
 		control, ok := names[k]
 		if !ok {
@@ -371,6 +366,13 @@ func (o *Operation) FormFields(origin string, page []byte, v Vars) (url.Values, 
 			s = crlf(s)
 		}
 		values.Set(k, s)
+		set[k] = true
+	}
+	for name := range computed {
+		if !set[name] {
+			// Errors reach receipts, so this doesn't name the field.
+			return nil, fmt.Errorf("%w: the form has a control whose default a browser may send differently", ErrSourceChanged)
+		}
 	}
 	return values, nil
 }
@@ -499,12 +501,6 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 				names[name] = atom.Input
 				switch t {
 				case "submit", "button", "reset", "image", "file":
-				case "range", "number", "color", "date", "time", "datetime-local", "month", "week":
-					// A browser clamps or rewrites these, so the page's own value
-					// may not be what it would send. Only a declared value is known.
-					computed[name] = true
-					val, _ := attr(n, "value")
-					values.Add(name, val)
 				case "radio":
 					if radios[name] == n {
 						val, ok := attr(n, "value")
@@ -523,6 +519,9 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 					}
 				default:
 					val, _ := attr(n, "value")
+					if !exactDefault(t, val) {
+						computed[name] = true
+					}
 					values.Add(name, val)
 				}
 			case n.DataAtom == atom.Textarea:
@@ -530,6 +529,9 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 				values.Add(name, crlf(rawText(n)))
 			case n.DataAtom == atom.Select:
 				names[name] = atom.Select
+				if _, sized := attr(n, "size"); sized {
+					computed[name] = true // a list box may have no default
+				}
 				selectValue(n, name, values)
 				return
 			case n.DataAtom == atom.Button:
@@ -555,11 +557,27 @@ func formValues(doc, form *html.Node) (url.Values, map[string]atom.Atom, map[str
 	return values, names, computed
 }
 
+// exactDefault reports whether a browser sends an input's default exactly as the
+// page has it. Most types are sanitized, clamped or rewritten, and this doesn't
+// reimplement that: anything else must come from the artifact.
+func exactDefault(typ, val string) bool {
+	switch typ {
+	case "hidden":
+		return true
+	case "", "text", "search", "tel", "password":
+		return !strings.ContainsAny(val, "\r\n")
+	}
+	return false
+}
+
 // submitOverride reports a submit button that sends the form somewhere else or
 // some other way. The artifact can't declare it: its target is checked against
 // the form, not the button.
 func submitOverride(n *html.Node, typ string) bool {
-	if typ != "submit" && typ != "image" {
+	if n.DataAtom == atom.Button && (typ == "button" || typ == "reset") {
+		return false
+	}
+	if n.DataAtom == atom.Input && typ != "submit" && typ != "image" {
 		return false
 	}
 	for _, a := range []string{"formaction", "formmethod", "formenctype", "formtarget"} {
@@ -636,10 +654,7 @@ func selectValue(n *html.Node, name string, values url.Values) {
 	case len(selected) > 0: // a single select keeps the last one marked
 		add(selected[len(selected)-1])
 	default:
-		// A drop-down shows its first enabled option; a list box shows none.
-		if size, _ := attr(n, "size"); size != "" && size != "0" && size != "1" {
-			return
-		}
+		// A drop-down shows its first enabled option.
 		for _, o := range opts {
 			_, off := attr(o, "disabled")
 			if !off && !optgroupDisabled(o) {

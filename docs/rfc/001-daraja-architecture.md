@@ -57,12 +57,13 @@ hasn't separately decided, and the details below replace the sketch in
 - **Writes** must declare `request.form_page` and fetch it first. The submitted
   values are the form's own, including its CSRF token, with `request.form` set
   over them. They follow the common rules a browser applies: form ownership,
-  disabled fieldsets and options, select defaults, radio groups and textarea
-  newlines. This isn't a full implementation of HTML form submission, and a page
-  that relies on script to change values at submit isn't covered. Declaring a
-  name that a button with its own `formaction` or similar also uses is drift, and
-  so is leaving a range, number, color or date control undeclared, because a
-  browser can rewrite its default. The action must match the
+  disabled fieldsets and options, drop-down defaults, radio groups and textarea
+  newlines. Daraja doesn't reimplement how browsers sanitize values. A default
+  it can't reproduce exactly, such as a number, email, date, or list-box control
+  or a text value with a newline, is drift unless the artifact sets that field.
+  A page that changes values with script at submit isn't covered. Declaring a
+  name that a button with its own `formaction` or similar also uses is drift.
+  The action must match the
   path and query that will be sent. A page over 8 MiB is drift, because a cut-off
   page could lose a field.
 - **Drift is checked before sending.** The selector must match exactly one

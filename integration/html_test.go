@@ -150,7 +150,6 @@ func TestFormFieldsFollowFormRules(t *testing.T) {
 		{"selected and disabled sends nothing", wrap(`<select name="s"><option value="a" disabled selected>A</option><option value="b">B</option></select>`, ""), "title=new"},
 		{"first enabled option is the default", wrap(`<select name="s"><optgroup disabled><option value="a">A</option></optgroup><option value="b">B</option></select>`, ""), "s=b&title=new"},
 		{"single select keeps the last selected", wrap(`<select name="s"><option value="a" selected>A</option><option value="b" selected>B</option></select>`, ""), "s=b&title=new"},
-		{"list box with nothing selected sends nothing", wrap(`<select name="s" size="3"><option value="a">A</option></select>`, ""), "title=new"},
 		{"last checked radio wins", wrap(`<input type="radio" name="mode" value="delete" checked><input type="radio" name="mode" value="save" checked>`, ""), "mode=save&title=new"},
 		{"last checked radio disabled sends nothing", wrap(`<input type="radio" name="mode" value="a" checked><input type="radio" name="mode" value="b" checked disabled>`, ""), "title=new"},
 		{"checked radio keeps its place before a later control", wrap(`<input type="radio" name="mode" value="save" checked><input type="hidden" name="mode" value="delete">`, ""), "mode=save&mode=delete&title=new"},
@@ -247,6 +246,40 @@ func TestUndeclaredControlABrowserRewritesIsDrift(t *testing.T) {
 	got, err := o.FormFields("http://a.test", page, v)
 	if err != nil || got.Get("quantity") != "5" {
 		t.Errorf("declared: %v, %v", got, err)
+	}
+}
+
+func TestDefaultsABrowserMayChangeAreDrift(t *testing.T) {
+	v := Vars{Input: map[string]any{"title": "t"}}
+	for _, control := range []string{
+		`<input type="number" name="n" value="1">`,
+		`<input type="email" name="n" value="a@b.test">`,
+		`<input type="url" name="n" value="http://a.test">`,
+		`<input type="unknown" name="n" value="x">`,
+		"<input name=\"n\" value=\"alice&#10;bob\">",
+		`<select name="n" size="01"><option value="a">A</option></select>`,
+	} {
+		page := []byte(`<form id="f" method="post" action="/notes"><input name="title">` + control + `</form>`)
+		if _, err := formOp(nil).FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
+			t.Errorf("undeclared %s: err = %v", control, err)
+		}
+		absent := formOp(func(o *Operation) { o.Request.Form["n"] = "{{input.absent}}" })
+		if _, err := absent.FormFields("http://a.test", page, v); !errors.Is(err, ErrSourceChanged) {
+			t.Errorf("declared but absent %s: err = %v", control, err)
+		}
+		set := formOp(func(o *Operation) { o.Request.Form["n"] = "{{input.title}}" })
+		got, err := set.FormFields("http://a.test", page, v)
+		if err != nil || got.Get("n") != "t" {
+			t.Errorf("set %s: %v, %v", control, got, err)
+		}
+	}
+}
+
+func TestEmptyButtonTypeIsASubmitButton(t *testing.T) {
+	page := []byte(`<form id="f" method="post" action="/notes"><input name="title"><button type="" name="mode" value="save" formaction="/save">x</button></form>`)
+	o := formOp(func(o *Operation) { o.Request.Form["mode"] = "save" })
+	if _, err := o.FormFields("http://a.test", page, Vars{Input: map[string]any{"title": "t"}}); !errors.Is(err, ErrSourceChanged) {
+		t.Errorf("err = %v, want ErrSourceChanged", err)
 	}
 }
 
