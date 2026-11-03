@@ -61,7 +61,8 @@ hasn't separately decided, and the details below replace the sketch in
   newlines. Daraja doesn't reimplement how browsers sanitize values. A default
   it can't reproduce exactly is drift unless the artifact sets that field: for
   example a number, email, date or list-box control, a text value with a newline,
-  `_charset_`, `dirname`, or a hard-wrapped textarea. A form a page encodes as
+  `_charset_`, `dirname`, a file control, or a hard-wrapped textarea. So is a
+  form whose ID isn't unique. A form a page encodes as
   anything but UTF-8, by its `Content-Type`, `<meta>` or `accept-charset`, is
   drift.
   A page that changes values with script at submit isn't covered. Declaring a
