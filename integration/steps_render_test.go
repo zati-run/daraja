@@ -2,8 +2,33 @@ package integration
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
+
+func TestStepsProofRequiresInputUsedBeforeCommit(t *testing.T) {
+	op := Operation{
+		Effect:   EffectWrite,
+		Response: ResponseSpec{Identifier: "id", Extract: map[string]Extract{"id": {CSS: "#id", Text: "{{input.title}}"}}},
+		Steps:    []Step{{Click: "#submit", Commit: true}},
+	}
+	validate := func() []string {
+		var problems []string
+		new(Compiled).validateStepsProof(&op, "write", func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) })
+		return problems
+	}
+	if len(validate()) == 0 {
+		t.Fatal("accepted an anchor that was never entered")
+	}
+	op.Steps = append([]Step{{Fill: "#title", Value: "{{input.title}}"}}, op.Steps...)
+	if problems := validate(); len(problems) != 0 {
+		t.Fatalf("rejected pre-commit proof input: %v", problems)
+	}
+	op.Steps[0], op.Steps[1] = op.Steps[1], op.Steps[0]
+	if len(validate()) == 0 {
+		t.Fatal("accepted an anchor entered only after commit")
+	}
+}
 
 func TestRenderStepsRequiresProofInputBeforeCommit(t *testing.T) {
 	op := Operation{

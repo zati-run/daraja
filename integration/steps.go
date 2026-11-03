@@ -161,6 +161,22 @@ func (c *Compiled) validateStepsProof(op *Operation, where string, add func(stri
 		add("%s: a browser.steps write's identifier needs css with text from {{input.x}}, so an unrelated page can't count as this write", where)
 	}
 	if !marked {
+		for _, st := range op.Steps {
+			if st.Commit {
+				break
+			}
+			if st.Fill == "" && st.Select == "" {
+				continue
+			}
+			for _, used := range templateRefs(st.Value) {
+				for _, anchor := range refs {
+					if used.root == "input" && used == anchor {
+						return
+					}
+				}
+			}
+		}
+		add("%s: a browser.steps write's identifier needs an input used by a fill or select before the commit step", where)
 		return
 	}
 	for _, st := range op.Steps {
