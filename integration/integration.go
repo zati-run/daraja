@@ -185,12 +185,17 @@ type ResponseSpec struct {
 	RefusedWhen []Refusal `json:"refused_when,omitempty"`
 }
 
-// Refusal matches a reviewed failure shape in a JSON response.
+// Refusal matches a reviewed failure shape in a JSON response. It sets exactly
+// one of Equals and Contains.
 type Refusal struct {
 	JSONPointer string `json:"json_pointer"`
 	// Equals is compared with the scalar at JSONPointer as a string, so
 	// "false" matches JSON false and "7" matches JSON 7.
-	Equals string `json:"equals"`
+	Equals string `json:"equals,omitempty"`
+	// Contains matches a substring of the string at JSONPointer, for a failure
+	// code nested in an error's text. Keep it specific: a broad match can class
+	// an applied write as refused.
+	Contains string `json:"contains,omitempty"`
 }
 
 // Refused reports whether a response body matches a declared failure shape.
@@ -207,7 +212,11 @@ func (o *Operation) Refused(body []byte) bool {
 		if !ok {
 			continue
 		}
-		if s, err := scalarString(v); err == nil && s == r.Equals {
+		s, err := scalarString(v)
+		if err != nil {
+			continue
+		}
+		if (r.Equals != "" && s == r.Equals) || (r.Contains != "" && strings.Contains(s, r.Contains)) {
 			return true
 		}
 	}
@@ -549,8 +558,8 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 		if r.JSONPointer == "" || !validPointer(r.JSONPointer) {
 			add("%s: response.refused_when[%d].json_pointer must be a non-empty JSON Pointer", where, i)
 		}
-		if r.Equals == "" {
-			add("%s: response.refused_when[%d].equals is required", where, i)
+		if (r.Equals == "") == (r.Contains == "") {
+			add("%s: response.refused_when[%d] needs exactly one of equals and contains", where, i)
 		}
 	}
 	if r := op.Reconcile; r != nil && op.Effect == EffectWrite {
