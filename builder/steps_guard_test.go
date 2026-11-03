@@ -43,7 +43,7 @@ func servePages(t *testing.T, pages map[string]string) *guardPages {
 func runPlan(t *testing.T, origin string, timeout time.Duration, steps ...integration.Step) capability.StepsResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	b, err := browser.Open(ctx, browser.Options{ProfileDir: filepath.Join(t.TempDir(), "profile"), Headless: true, StepTimeout: timeout})
 	if err != nil {
 		t.Fatal(err)

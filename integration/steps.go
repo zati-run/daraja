@@ -183,6 +183,13 @@ func (c *Compiled) validateStepsProof(op *Operation, where string, add func(stri
 // an absent input is dropped, like an absent field of a request.
 func (o *Operation) RenderSteps(v Vars) ([]Step, error) {
 	out := make([]Step, 0, len(o.Steps))
+	proof := map[ref]bool{}
+	if o.Effect == EffectWrite {
+		for _, r := range templateRefs(o.Response.Extract[o.Response.Identifier].Text) {
+			proof[r] = true
+		}
+	}
+	committed := false
 	for _, st := range o.Steps {
 		var err error
 		if st.Navigate != "" {
@@ -198,8 +205,16 @@ func (o *Operation) RenderSteps(v Vars) ([]Step, error) {
 			}
 		}
 		if st.Value != "" {
+			valueRefs := templateRefs(st.Value)
 			st.Value, err = v.RenderString(st.Value, nil)
 			if errors.Is(err, ErrAbsent) {
+				if !committed && (st.Fill != "" || st.Select != "") {
+					for _, r := range valueRefs {
+						if proof[r] {
+							return nil, err
+						}
+					}
+				}
 				continue
 			}
 			if err != nil {
@@ -207,6 +222,7 @@ func (o *Operation) RenderSteps(v Vars) ([]Step, error) {
 			}
 		}
 		out = append(out, st)
+		committed = committed || st.Commit
 	}
 	return out, nil
 }
