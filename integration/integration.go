@@ -731,8 +731,10 @@ func (c *Compiled) validateExecution(op *Operation, where string, add func(strin
 			if _, err := cascadia.ParseGroup(fp.Selector); fp.Selector == "" || err != nil {
 				add("%s: request.form_page.selector %q is not a CSS selector", where, fp.Selector)
 			}
-			if req.Method == http.MethodGet || req.Method == http.MethodHead {
-				add("%s: request.form_page needs a method that submits a body", where)
+			// A browser reads any other method on a form as GET, so the form
+			// wouldn't show what the artifact does.
+			if !strings.EqualFold(req.Method, http.MethodPost) {
+				add("%s: request.form_page needs method POST", where)
 			}
 		}
 	default:

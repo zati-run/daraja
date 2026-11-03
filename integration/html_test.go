@@ -377,6 +377,9 @@ func TestParseRefusesFormOperationsThatCantWork(t *testing.T) {
 		{"redirect in success_status", "not success_status", func(m map[string]any) {
 			write(m, func(_, r map[string]any) { r["success_status"] = []any{200, 302} })
 		}},
+		{"write with another method", "needs method POST", func(m map[string]any) {
+			write(m, func(op, _ map[string]any) { op["request"].(map[string]any)["method"] = "DELETE" })
+		}},
 		{"write with no form page", "needs request.form_page", func(m map[string]any) {
 			write(m, func(op, _ map[string]any) { delete(op["request"].(map[string]any), "form_page") })
 		}},
