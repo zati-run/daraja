@@ -563,10 +563,15 @@ func stepError(err error) error {
 }
 
 // RunSteps implements capability.Page. It stops at the first failure. It uses
-// real input events, so the application sees what a person's input produces.
+// scripted DOM changes and synthetic events, not trusted keyboard or pointer
+// input. Applications requiring trusted events may not respond, and page event
+// handlers can still cause side effects.
 func (b *Browser) RunSteps(ctx context.Context, in *integration.Compiled, steps []integration.Step) capability.StepsResult {
 	var res capability.StepsResult
 	fail := func(i int, err error) capability.StepsResult {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		res.Err = fmt.Errorf("step %d: %w", i, stepError(err))
 		res.Drift = errors.Is(err, errDrift)
 		return res

@@ -3,8 +3,31 @@ package integration
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
+
+func TestStepsOriginMustMatchBrowserCanonicalForm(t *testing.T) {
+	for _, tc := range []struct {
+		origin  string
+		invalid bool
+	}{
+		{"https://example.com", false}, {"http://127.0.0.1:8080", false},
+		{"https://Example.com", true}, {"https://example.com/", true},
+		{"https://example.com:443", true}, {"http://127.0.0.1:80", true},
+		{"https://example.com#fragment", true},
+	} {
+		t.Run(tc.origin, func(t *testing.T) {
+			c := &Compiled{Integration: &Integration{Source: Source{Origin: tc.origin}}}
+			var problems []string
+			c.validateSteps(&Operation{}, "op", func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) })
+			found := strings.Contains(strings.Join(problems, "\n"), "canonical browser origin")
+			if found != tc.invalid {
+				t.Fatalf("canonical origin error = %v, want %v: %v", found, tc.invalid, problems)
+			}
+		})
+	}
+}
 
 func TestStepsProofRequiresInputUsedBeforeCommit(t *testing.T) {
 	op := Operation{

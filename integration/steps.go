@@ -42,6 +42,11 @@ type Expect struct {
 }
 
 func (c *Compiled) validateSteps(op *Operation, where string, add func(string, ...any)) {
+	if u, err := url.Parse(c.Source.Origin); err == nil && u.Host != "" {
+		if u.User != nil || u.Fragment != "" || u.Path != "" || u.Host != strings.ToLower(u.Host) || (u.Scheme == "https" && u.Port() == "443") || (u.Scheme == "http" && u.Port() == "80") {
+			add("%s: browser.steps source.origin must be a canonical browser origin (lowercase host, no trailing slash or default port)", where)
+		}
+	}
 	if c.Session.Provider != ProviderBrowser {
 		add("%s: browser.steps needs session provider browser", where)
 	}
