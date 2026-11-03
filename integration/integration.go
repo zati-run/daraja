@@ -595,6 +595,10 @@ func (c *Compiled) validateOp(cop *CompiledOp, add func(string, ...any)) {
 				add("%s: reconcile.operation %q does not exist", where, r.Operation)
 			} else if target.Effect != EffectRead {
 				add("%s: reconcile.operation %q must be a read", where, r.Operation)
+			} else if len(target.Response.Output) == 0 {
+				// With nothing mapped, any answer, even a sign-in page, reads as
+				// "not found", which permits a second write.
+				add("%s: reconcile.operation %q must map an output", where, r.Operation)
 			}
 			for k, v := range r.Input {
 				checkTemplate(where+".reconcile.input."+k, v, map[string]bool{"receipt": true}, add)

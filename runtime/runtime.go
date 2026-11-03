@@ -785,7 +785,7 @@ func (r *Runtime) mapResponse(op *integration.CompiledOp, status int, body []byt
 		return nil, errf(CodeSourceRefused, "the source answered with a declared failure")
 	}
 	var doc any
-	if len(op.Response.Output) > 0 {
+	if len(op.Response.Output) > 0 || len(op.Response.RefusedWhen) > 0 {
 		if err := json.Unmarshal(body, &doc); err != nil {
 			return nil, errf(CodeInvalidOutput, "the response is not JSON")
 		}
