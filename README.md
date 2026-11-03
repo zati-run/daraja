@@ -160,6 +160,9 @@ go test -race ./...        # Browser tests need Chrome, and skip if it's missing
 go test -race -short ./... # Skips the tests that start Chrome.
 ```
 
+CI runs `gofmt`, `go vet` and the full race test suite on every pull request
+and on `main`, and it fails if any test skips.
+
 ## License
 
 [Apache 2.0](LICENSE)
