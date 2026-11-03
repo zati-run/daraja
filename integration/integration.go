@@ -204,12 +204,17 @@ func (o *Operation) Refused(body []byte) bool {
 	if len(o.Response.RefusedWhen) == 0 {
 		return false
 	}
+	// A body the ordinary decoder rejects isn't a declared failure: it may be
+	// malformed, and the runtime couldn't read an identifier from it either.
+	if err := json.Unmarshal(body, new(any)); err != nil {
+		return false
+	}
 	// Numbers stay as sent: decoded to float64, a distinct large number could
 	// round into the declared one.
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var doc any
-	if dec.Decode(&doc) != nil || dec.More() {
+	if dec.Decode(&doc) != nil {
 		return false
 	}
 	for _, r := range o.Response.RefusedWhen {
