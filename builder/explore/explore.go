@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -548,6 +549,7 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	mainID := chromedp.FromContext(b.Ctx).Target.TargetID
 	var tabsMu sync.Mutex
 	tabs := map[target.ID]bool{mainID: true}
+	tabCtxs := []context.Context{b.Ctx}
 	extraTabs := 0
 	created := chromedp.BrowserEvents(lctx, target.TargetCreated)
 	wg.Add(1)
@@ -577,6 +579,9 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 			if err := chromedp.Do(tctx); err != nil {
 				continue
 			}
+			tabsMu.Lock()
+			tabCtxs = append(tabCtxs, tctx)
+			tabsMu.Unlock()
 			if err := listen(tctx, string(id)); err != nil {
 				tabsMu.Lock()
 				unarmedTabs++
@@ -588,9 +593,29 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	walkErr := runWalk(ctx, b, task, rec, signIn, o)
 	unsettled := !rec.settle(ctx, o)
 	rec.pending.Wait()
+	// A read-only walk's guards end with it, but its pages would keep running:
+	// timers could write, and releasing a held frame would let it load with
+	// its sockets. So every page is stopped first, while the guards still hold.
+	unstopped, stillHeld := 0, 0
+	if readOnly {
+		tabsMu.Lock()
+		stop := slices.Clone(tabCtxs)
+		tabsMu.Unlock()
+		for _, tctx := range stop {
+			nctx, ncancel := context.WithTimeout(tctx, 10*time.Second)
+			if err := chromedp.Do(nctx, chromedp.Navigate("about:blank")); err != nil {
+				unstopped++
+			}
+			ncancel()
+		}
+		if err := sg.stopServiceWorkers(b.Ctx); err != nil {
+			unstopped++
+		}
+		stillHeld = sg.waitHeldGone(ctx, 5*time.Second)
+	}
 	cancel()
 	wg.Wait()
-	if readOnly {
+	if readOnly && stillHeld == 0 {
 		sg.disarm(b.Ctx)
 	}
 
@@ -629,13 +654,19 @@ func ExploreWith(ctx context.Context, b *browser.Browser, task *Task, signIn *in
 	tabsMu.Unlock()
 	if readOnly {
 		sg.mu.Lock()
-		if n := len(sg.held); n > 0 {
+		if n := sg.heldEver; n > 0 {
 			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d cross-site frame(s) or worker(s) were held paused so they could not open sockets; they did not load and their traffic was not recorded", n))
 		}
 		if sg.running > 0 {
 			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d frame(s) or worker(s) were already running when Daraja attached; they keep socket constructors, and socket frames are not checked by the write guard", sg.running))
 		}
 		sg.mu.Unlock()
+		if unstopped > 0 {
+			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d page(s) or service-worker group(s) could not be stopped when the walk ended; they may have kept running without the write guard until the browser closed", unstopped))
+		}
+		if stillHeld > 0 {
+			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d held frame(s) or worker(s) did not go away, so they stay paused; new frames in this browser also stay paused until it closes", stillHeld))
+		}
 		if unarmedTabs > 0 {
 			rep.Coverage.Gaps = append(rep.Coverage.Gaps, fmt.Sprintf("%d tab(s) could not be fully attached; their sockets and workers were not disabled", unarmedTabs))
 		}

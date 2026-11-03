@@ -343,9 +343,14 @@ func TestReadOnlyWalkBlocksEveryWriteVector(t *testing.T) {
 		if err != nil {
 			t.Fatalf("explore: %v", err)
 		}
+		if len(effects) == 1 {
+			// Whatever the walk held back must stay stopped after it ends, for
+			// as long as the browser stays open.
+			time.Sleep(1500 * time.Millisecond)
+		}
 		return app.Creates(), rep
 	}
-	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "wsworker", "wsnested", "wsshared", "wsframe", "ping", "sw"} {
+	for _, vector := range []string{"form", "popup", "worker", "beacon", "gqlget", "apqget", "ws", "wsworker", "wsnested", "wsshared", "wsframe", "ping", "sw", "latewrite", "latepopup"} {
 		t.Run(vector, func(t *testing.T) {
 			// Control: with writes allowed, the vector really writes.
 			if n, _ := run(t, vector, []string{"read", "write"}); n == 0 {
