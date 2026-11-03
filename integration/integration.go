@@ -691,6 +691,9 @@ func (c *Compiled) validateExecution(op *Operation, where string, add func(strin
 			add("%s: a read needs response.extract", where)
 		}
 		if op.Effect == EffectWrite {
+			if req.FormPage == nil {
+				add("%s: an http.form_html write needs request.form_page, so the form is checked before sending", where)
+			}
 			// A status alone can't show a form write worked: most sign-in and
 			// validation pages answer 200.
 			if _, ok := resp.Extract[resp.Identifier]; resp.Identifier == "" || !ok {

@@ -156,6 +156,22 @@ func TestFormWriteOutcomes(t *testing.T) {
 	}
 }
 
+func TestFormPageOverLimitSendsNothing(t *testing.T) {
+	t.Parallel()
+	e := newFormEnv(t, 5*time.Second)
+	if _, err := e.rt.Invoke(context.Background(), e.p, "synthetic-notes-form", "get_note", map[string]any{"id": 1}, ""); err != nil {
+		t.Fatal(err)
+	}
+	e.app.FormPadding = 8<<20 + 1
+	_, err := e.create("Big", "k")
+	if err == nil || err.Code != runtime.CodeSourceChanged || err.Receipt == nil || err.Receipt.State != journal.Failed {
+		t.Fatalf("err = %+v", err)
+	}
+	if n := e.app.Creates(); n != 0 {
+		t.Errorf("creates = %d, want 0", n)
+	}
+}
+
 func TestFormLostAnswerReconcilesFromTheList(t *testing.T) {
 	t.Parallel()
 	e := newFormEnv(t, 500*time.Millisecond)
