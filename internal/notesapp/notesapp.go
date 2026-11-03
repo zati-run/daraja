@@ -134,6 +134,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<!doctype html><html><body><script>new WebSocket('ws://' + location.host + '/ws');</script></body></html>`)
 	case r.URL.Path == "/popup-now":
 		fmt.Fprint(w, `<!doctype html><html><body><script>fetch('/api/sink', {method: 'POST', body: 'popup'});</script></body></html>`)
+	case r.URL.Path == "/late-opener":
+		fmt.Fprint(w, `<!doctype html><html><body><script>setInterval(() => { opener.location = '/late-main?' + Date.now(); }, 1000);</script></body></html>`)
+	case r.URL.Path == "/late-main":
+		fmt.Fprint(w, `<!doctype html><html><body><script>fetch('/api/sink', {method: 'POST', body: 'late main'}); setInterval(() => fetch('/api/sink', {method: 'POST', body: 'late main'}), 1000);</script></body></html>`)
 	case r.URL.Path == "/late-popup":
 		fmt.Fprint(w, `<!doctype html><html><body><script>setInterval(() => fetch('/api/sink', {method: 'POST', body: 'late popup'}), 1000);</script></body></html>`)
 	case r.URL.Path == "/api/sink" && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions:
@@ -322,6 +326,7 @@ const writersPage = `<!doctype html><html><body>
 <button id=latewrite onclick="setInterval(() => fetch('/api/sink', {method: 'POST', body: 'late'}), 1000)">latewrite</button>
 <button id=latepopup onclick="window.open('/late-popup', '_blank')">latepopup</button>
 <button id=latechurn onclick="setInterval(() => window.open('/late-popup', '_blank'), 1000)">latechurn</button>
+<button id=lateopener onclick="window.open('/late-opener', '_blank')">lateopener</button>
 <button id=gqlget onclick="fetch('/api/graphql?query=' + encodeURIComponent('mutation M { createNote(title: &quot;x&quot;) { id } }'))">gqlget</button>
 </body></html>`
 

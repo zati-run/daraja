@@ -113,7 +113,8 @@ owner hasn't separately decided:
   ended, its write guard ended too while its pages kept running until the
   browser closed, so a timer could write, and a held frame was released to
   load with its sockets. Now the main tab goes to `about:blank` while the
-  guards hold, every other tab is closed until none is left, service workers
+  guards hold, every other tab is closed until none is left and the main tab
+  is back on `about:blank` (a popup can navigate its opener), service workers
   are stopped, and the walk waits for held targets to go away. If anything can't
   be stopped, the browser is closed and the report says so. A held service
   worker always closes it, because the browser restarts a stopped one.

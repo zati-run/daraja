@@ -141,7 +141,7 @@ commands, use `-h` to see their flags.
 | OAuth 2.1 with CIMD | Covered by tests with a synthetic client. Not yet qualified with the Zendesk run. |
 | `http.form_html`, `browser.steps` | Designed, not implemented. |
 | Deployed service | None. |
-| CI | None yet. Tests run locally. |
+| CI | `gofmt`, `go vet` and the full race test suite, on every pull request and on `main`. |
 
 The [evidence table in the RFC](docs/rfc/001-daraja-architecture.md#evidence-status)
 records the environment and method for each result, and known limits such as
